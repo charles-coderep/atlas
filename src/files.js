@@ -3,7 +3,7 @@ const path = require('path');
 const { getClient } = require('./db');
 
 const FILES_DIR = path.join(__dirname, '..', 'files');
-const MAX_CONTENT_CHARS = 8000; // ~2000 tokens
+const MAX_CONTENT_CHARS = 8000;
 
 function ensureFilesDir() {
   if (!fs.existsSync(FILES_DIR)) {
@@ -11,7 +11,7 @@ function ensureFilesDir() {
   }
 }
 
-function extractText(filePath) {
+async function extractText(filePath) {
   const ext = path.extname(filePath).toLowerCase();
 
   if (ext === '.txt' || ext === '.md') {
@@ -19,11 +19,51 @@ function extractText(filePath) {
   }
 
   if (ext === '.pdf') {
-    // PDF support requires a library — for now, note the limitation
-    throw new Error('PDF parsing not yet supported. Convert to .txt or .md first.');
+    const pdfParse = require('pdf-parse');
+    const buffer = fs.readFileSync(filePath);
+    const data = await pdfParse(buffer);
+    return data.text || '';
   }
 
-  throw new Error(`Unsupported file type: ${ext}. Supported: .txt, .md`);
+  if (ext === '.csv') {
+    const Papa = require('papaparse');
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    const parsed = Papa.parse(raw, { header: true, preview: 50 });
+    const headers = parsed.meta.fields || [];
+    const rowCount = raw.split('\n').length - 1;
+    let summary = `CSV file: ${rowCount} rows, ${headers.length} columns\n`;
+    summary += `Headers: ${headers.join(', ')}\n\n`;
+    // Include first rows as readable data
+    for (const row of parsed.data.slice(0, 20)) {
+      summary += headers.map((h) => `${h}: ${row[h]}`).join(' | ') + '\n';
+    }
+    if (rowCount > 20) summary += `\n... and ${rowCount - 20} more rows`;
+    return summary;
+  }
+
+  if (ext === '.json') {
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    // Structural summary for large JSON
+    if (raw.length > 2000) {
+      const keys = Object.keys(parsed);
+      let summary = `JSON file with ${keys.length} top-level keys: ${keys.join(', ')}\n\n`;
+      for (const key of keys.slice(0, 10)) {
+        const val = parsed[key];
+        if (Array.isArray(val)) {
+          summary += `${key}: array of ${val.length} items\n`;
+        } else if (typeof val === 'object' && val !== null) {
+          summary += `${key}: object with keys [${Object.keys(val).slice(0, 5).join(', ')}]\n`;
+        } else {
+          summary += `${key}: ${String(val).substring(0, 100)}\n`;
+        }
+      }
+      return summary;
+    }
+    return raw;
+  }
+
+  throw new Error(`Unsupported file type: ${ext}. Supported: .txt, .md, .pdf, .csv, .json`);
 }
 
 async function ingestFile(filePath, goalId) {
@@ -35,13 +75,12 @@ async function ingestFile(filePath, goalId) {
 
   const filename = path.basename(filePath);
   const fileType = path.extname(filePath).toLowerCase().replace('.', '');
-  let content = extractText(filePath);
+  let content = await extractText(filePath);
 
   // Copy to files directory
   const destPath = path.join(FILES_DIR, filename);
   fs.copyFileSync(filePath, destPath);
 
-  // Truncate if too large
   let truncated = false;
   if (content.length > MAX_CONTENT_CHARS) {
     content = content.substring(0, MAX_CONTENT_CHARS);
@@ -89,7 +128,6 @@ async function getFilesByGoal(goalId) {
 
 async function searchFiles(keywords) {
   const db = getClient();
-  // Search filenames and content for keyword matches
   const { data, error } = await db
     .from('files')
     .select('*')

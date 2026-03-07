@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 
 // Load .env before anything else
@@ -85,6 +85,8 @@ function registerIPC() {
 
   // --- DB: Overrides ---
   ipcMain.handle('overrides:getUnresolved', () => db.getUnresolvedOverrides());
+  ipcMain.handle('overrides:getAll', () => db.getAllOverrides());
+  ipcMain.handle('overrides:update', (_, id, updates) => db.updateOverride(id, updates));
 
   // --- DB: Files ---
   ipcMain.handle('files:list', () => {
@@ -107,7 +109,7 @@ function registerIPC() {
   ipcMain.handle('files:pickAndIngest', async (_, goalId) => {
     const result = await dialog.showOpenDialog(mainWindow, {
       properties: ['openFile'],
-      filters: [{ name: 'Documents', extensions: ['txt', 'md'] }],
+      filters: [{ name: 'Documents', extensions: ['txt', 'md', 'pdf', 'csv', 'json'] }],
     });
     if (result.canceled || result.filePaths.length === 0) return null;
     const { ingestFile } = require('../src/files');
@@ -217,6 +219,19 @@ Keep it scannable. Under 3 minutes to read. Reference specific past events and c
     return { sessionId: chatSession.id, opening };
   });
 
+  // Session windowing — keep history manageable
+  const MAX_HISTORY_MESSAGES = 40;
+  const WINDOWED_KEEP_RECENT = 20;
+
+  function windowHistory() {
+    if (chatHistory.length > MAX_HISTORY_MESSAGES) {
+      // Keep first 2 messages (opening context) + last WINDOWED_KEEP_RECENT
+      const opening = chatHistory.slice(0, 2);
+      const recent = chatHistory.slice(-WINDOWED_KEEP_RECENT);
+      chatHistory = [...opening, { role: 'System', content: `[${chatHistory.length - 2 - WINDOWED_KEEP_RECENT} earlier messages trimmed for context management]` }, ...recent];
+    }
+  }
+
   ipcMain.handle('chat:send', async (_, message) => {
     if (!chatSession) return { error: 'No active session' };
 
@@ -225,6 +240,7 @@ Keep it scannable. Under 3 minutes to read. Reference specific past events and c
     const { searchGmail } = require('../src/integrations/gmail');
 
     chatHistory.push({ role: 'User', content: message });
+    windowHistory();
 
     let response = await callClaudeConversation(message, chatSystemPrompt, chatHistory.slice(0, -1));
 
@@ -367,9 +383,95 @@ Keep it scannable. Under 3 minutes to read. Reference specific past events and c
     return getLastDiagnostics();
   });
 
+  ipcMain.handle('goals:updateSources', async (_, id, sources) => {
+    const goal = await db.getGoal(id);
+    if (!goal) throw new Error('Goal not found');
+    const goalData = goal.goal_data || {};
+    goalData.context_sources = sources;
+    await db.saveGoal({ ...goal, goal_data: goalData });
+  });
+
   ipcMain.handle('goals:generateId', () => {
     const { generateGoalId } = require('../src/orchestrator');
     return generateGoalId();
+  });
+
+  // --- PDF Export ---
+  ipcMain.handle('export:pdf', async (_, htmlContent, title) => {
+    const fs = require('fs');
+    const { BrowserWindow: BW } = require('electron');
+
+    const result = await dialog.showSaveDialog(mainWindow, {
+      defaultPath: `Atlas_${title || 'Brief'}_${new Date().toISOString().split('T')[0]}.pdf`,
+      filters: [{ name: 'PDF', extensions: ['pdf'] }],
+    });
+    if (result.canceled) return null;
+
+    const printWindow = new BW({ show: false, webPreferences: { nodeIntegration: false } });
+    const styledHtml = `<!DOCTYPE html><html><head><style>
+      body { font-family: 'Segoe UI', sans-serif; color: #1a1a1a; padding: 40px; max-width: 700px; margin: 0 auto; line-height: 1.6; }
+      h1 { font-size: 22px; margin-bottom: 4px; } h2 { font-size: 18px; margin-top: 20px; } h3 { font-size: 15px; }
+      ul, ol { padding-left: 20px; } li { margin-bottom: 4px; }
+      strong { font-weight: 600; } code { background: #f0f0f0; padding: 2px 4px; border-radius: 3px; font-size: 13px; }
+      .meta { color: #666; font-size: 12px; margin-bottom: 20px; }
+    </style></head><body>
+      <h1>Atlas — ${title || 'Brief'}</h1>
+      <div class="meta">${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</div>
+      ${htmlContent}
+    </body></html>`;
+
+    await printWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(styledHtml));
+    const pdfData = await printWindow.webContents.printToPDF({ printBackground: true, pageSize: 'A4', margins: { top: 0.4, bottom: 0.4, left: 0.4, right: 0.4 } });
+    fs.writeFileSync(result.filePath, pdfData);
+    printWindow.close();
+
+    shell.showItemInFolder(result.filePath);
+    return result.filePath;
+  });
+
+  // --- AI: End-of-Day Reflection ---
+  ipcMain.handle('brief:reflection', async (_, options) => {
+    const { buildSystemPrompt, callClaude } = require('../src/orchestrator');
+    const goals = await db.getActiveGoals();
+    if (goals.length === 0) return null;
+
+    const systemPrompt = await buildSystemPrompt(goals, options || {});
+    const todaySessions = await db.getRecentSessions(1);
+    const openActions = await db.getOpenActions();
+    const overdueActions = await db.getOverdueActions();
+
+    const sessionSummaries = todaySessions
+      .filter((s) => s.summary)
+      .map((s) => `- ${s.summary}`)
+      .join('\n') || 'No sessions today.';
+
+    const reflectionPrompt = `Generate an end-of-day reflection. Today's date: ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}.
+
+Today's sessions:
+${sessionSummaries}
+
+Open actions: ${openActions.length} (${overdueActions.length} overdue)
+
+Generate a brief, honest reflection covering:
+1. **What moved forward today** — concrete progress on goals
+2. **What didn't happen** — planned items that were skipped or avoided
+3. **Pattern check** — any drift, avoidance, or procrastination patterns
+4. **Tomorrow's priority** — the single most important thing to do first
+
+Be direct. Under 2 minutes to read. No fluff.`;
+
+    return callClaude(reflectionPrompt, systemPrompt);
+  });
+
+  // --- Engine Info ---
+  ipcMain.handle('settings:getEngines', () => {
+    const { getAvailableEngines } = require('../src/orchestrator');
+    return getAvailableEngines();
+  });
+
+  ipcMain.handle('settings:setEngine', (_, name) => {
+    const { setEngine } = require('../src/orchestrator');
+    setEngine(name);
   });
 
   ipcMain.handle('settings:getAgentSpecs', () => {
@@ -462,7 +564,7 @@ When the goal is sharp enough, present a natural-language summary and ask for co
   });
 
   ipcMain.handle('interview:complete', async () => {
-    const { callClaude, generateGoalId } = require('../src/orchestrator');
+    const { callClaude, generateGoalId, DEFAULT_CONTEXT_SOURCES } = require('../src/orchestrator');
 
     const transcript = interviewHistory.map((m) => `${m.role}: ${m.content}`).join('\n\n');
 
@@ -491,6 +593,10 @@ Return ONLY valid JSON. No explanation.`;
     if (!match) throw new Error('Failed to structure goal from conversation');
 
     const goalData = JSON.parse(match[0]);
+    // Add default context sources if not present
+    if (!goalData.context_sources) {
+      goalData.context_sources = { ...DEFAULT_CONTEXT_SOURCES };
+    }
     const id = interviewGoalId || await generateGoalId();
 
     await db.saveGoal({
@@ -501,7 +607,6 @@ Return ONLY valid JSON. No explanation.`;
       goal_data: goalData,
       status: 'active',
     });
-    // Force status to active in case upsert didn't update it
     await db.updateGoalStatus(id, 'active');
     console.log('[Interview] Goal saved:', id, goalData.title);
 

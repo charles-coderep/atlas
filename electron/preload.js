@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('atlas', {
     save: (goal) => ipcRenderer.invoke('goals:save', goal),
     updateStatus: (id, status) => ipcRenderer.invoke('goals:updateStatus', id, status),
     generateId: () => ipcRenderer.invoke('goals:generateId'),
+    updateSources: (id, sources) => ipcRenderer.invoke('goals:updateSources', id, sources),
   },
 
   // Actions
@@ -40,6 +41,8 @@ contextBridge.exposeInMainWorld('atlas', {
   // Overrides
   overrides: {
     getUnresolved: () => ipcRenderer.invoke('overrides:getUnresolved'),
+    getAll: () => ipcRenderer.invoke('overrides:getAll'),
+    update: (id, updates) => ipcRenderer.invoke('overrides:update', id, updates),
   },
 
   // Files
@@ -54,6 +57,7 @@ contextBridge.exposeInMainWorld('atlas', {
   // Brief
   brief: {
     generate: (options) => ipcRenderer.invoke('brief:generate', options),
+    reflection: (options) => ipcRenderer.invoke('brief:reflection', options),
   },
 
   // Chat
@@ -95,6 +99,13 @@ contextBridge.exposeInMainWorld('atlas', {
     getMethodology: () => ipcRenderer.invoke('settings:getMethodology'),
     isGoogleConfigured: () => ipcRenderer.invoke('settings:isGoogleConfigured'),
     getDiagnostics: () => ipcRenderer.invoke('settings:getDiagnostics'),
+    getEngines: () => ipcRenderer.invoke('settings:getEngines'),
+    setEngine: (name) => ipcRenderer.invoke('settings:setEngine', name),
+  },
+
+  // Export
+  export: {
+    pdf: (htmlContent, title) => ipcRenderer.invoke('export:pdf', htmlContent, title),
   },
 
   // Interview (conversational)

@@ -416,21 +416,33 @@ function formatEmailsForPrompt(emailData) {
     return `Scanned: ${triageCount || 0} emails (last ${TRIAGE_WINDOW_HOURS}h). No goal-relevant emails found.`;
   }
 
-  let output = `Scanned: ${triageCount} emails (last ${TRIAGE_WINDOW_HOURS}h) | Deeply read: ${deepReadCount} (goal-relevant) | Threads expanded: ${expandedThreadCount} | Inbox unread: ${unreadCount}\n\n`;
+  let output = `Scanned: ${triageCount} emails (last ${TRIAGE_WINDOW_HOURS}h) | Deeply read: ${deepReadCount} | Threads expanded: ${expandedThreadCount} | Inbox unread: ${unreadCount}\n\n`;
 
-  for (const s of summaries) {
-    const status = s.isUnread ? 'UNREAD' : 'read';
-    output += `--- [${status}] From: ${s.from}\n`;
-    output += `Subject: ${s.subject}\n`;
-    output += `Date: ${s.date}\n`;
+  // Compressed thread-level summaries only — no raw bodies in prompt
+  for (let i = 0; i < summaries.length; i++) {
+    const s = summaries[i];
+    const status = s.isUnread ? 'UNREAD — needs reply' : 'read';
+    const fromShort = s.from.replace(/<[^>]+>/g, '').trim();
+
+    output += `${i + 1}. ${fromShort} — ${s.subject}\n`;
+    output += `   Status: ${status}. Date: ${s.date}\n`;
 
     if (s.threadExpanded && s.threadMessages) {
-      output += `Thread (${s.threadMessages.length} messages):\n`;
-      for (const msg of s.threadMessages) {
-        output += `  [${msg.date}] ${msg.from}:\n  ${msg.body.substring(0, 500).split('\n').join('\n  ')}\n`;
+      output += `   Thread: ${s.threadMessages.length} messages. `;
+      const lastMsg = s.threadMessages[s.threadMessages.length - 1];
+      if (lastMsg) {
+        const lastFrom = lastMsg.from.replace(/<[^>]+>/g, '').trim();
+        output += `Latest from ${lastFrom}.\n`;
       }
-    } else {
-      output += `Body: ${s.body.split('\n').join('\n  ')}\n`;
+    }
+
+    // Use AI-generated summary if available, otherwise snippet
+    if (s.aiSummary) {
+      output += `   ${s.aiSummary}\n`;
+    } else if (s.body) {
+      // Compress to one-line snippet
+      const snippet = s.body.replace(/\s+/g, ' ').substring(0, 150).trim();
+      output += `   Preview: ${snippet}\n`;
     }
     output += '\n';
   }

@@ -311,6 +311,23 @@ async function getUnresolvedOverrides() {
   return data;
 }
 
+async function updateOverride(id, updates) {
+  const db = getClient();
+  const { data, error } = await db.from('overrides').update(updates).eq('id', id).select().single();
+  if (error) throw error;
+  return data;
+}
+
+async function getAllOverrides() {
+  const db = getClient();
+  const { data, error } = await db
+    .from('overrides')
+    .select('*')
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+  return data;
+}
+
 module.exports = {
   initDB, getClient,
   saveGoal, getActiveGoals, getGoal, updateGoalStatus, getAllGoals,
@@ -318,6 +335,6 @@ module.exports = {
   saveEntry, getRecentEntries, getPersistentEntries, getEntriesByGoal, getEntriesByType,
   saveAction, getOpenActions, updateAction, getOverdueActions, getCompletedActions, getAllActions,
   getEntriesBySession,
-  saveOverride, getUnresolvedOverrides,
+  saveOverride, getUnresolvedOverrides, updateOverride, getAllOverrides,
   saveFile, getFiles, searchEntries,
 };

@@ -1,4 +1,3 @@
-const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const {
@@ -10,6 +9,41 @@ const crypto = require('crypto');
 
 const CONFIG_DIR = path.join(__dirname, '..', 'config');
 const TOKEN_CEILING = 6000;
+
+const DEFAULT_CONTEXT_SOURCES = {
+  gmail: 'included',
+  calendar: 'included',
+  files: 'included',
+  web_search: 'included',
+  memory: 'included',
+};
+
+function getGoalSourcePolicy(goals) {
+  // Merge source policies across all active goals
+  // A source is included if ANY active goal includes it
+  const merged = { gmail: false, calendar: false, files: false, web_search: false, memory: false };
+  for (const g of goals) {
+    const sources = (g.goal_data && g.goal_data.context_sources) || DEFAULT_CONTEXT_SOURCES;
+    for (const key of Object.keys(merged)) {
+      if (sources[key] === 'included') merged[key] = true;
+    }
+  }
+  return merged;
+}
+
+function getExcludedByGoal(goals) {
+  // Returns which sources are excluded per goal (for diagnostics)
+  const exclusions = [];
+  for (const g of goals) {
+    const sources = (g.goal_data && g.goal_data.context_sources) || DEFAULT_CONTEXT_SOURCES;
+    for (const [key, val] of Object.entries(sources)) {
+      if (val === 'excluded') {
+        exclusions.push({ goal: g.title || g.id, source: key });
+      }
+    }
+  }
+  return exclusions;
+}
 
 // --- Diagnostics state ---
 let lastDiagnostics = null;
@@ -180,8 +214,12 @@ async function buildSystemPrompt(goals, options = {}) {
       getRecentEntries(7),
     ]);
 
-  const calendarData = options.calendarData || null;
-  const emailData = options.emailData || null;
+  // Goal-aware source filtering
+  const sourcePolicy = getGoalSourcePolicy(goals);
+  const sourceExclusions = getExcludedByGoal(goals);
+
+  const calendarData = sourcePolicy.calendar ? (options.calendarData || null) : null;
+  const emailData = sourcePolicy.gmail ? (options.emailData || null) : null;
   const extraContext = options.extraContext || '';
 
   // Core sections — never trimmed
@@ -312,6 +350,8 @@ Context marked [user-maintained] was written by the user. Context marked [auto-c
       emailTriaged: emailData ? (emailData.triageCount || 0) : 0,
       emailDeepRead: emailData ? (emailData.deepReadCount || 0) : 0,
     },
+    sourcePolicy,
+    sourceExclusions,
   };
 
   return prompt;
@@ -327,76 +367,43 @@ function generateGoalId() {
 
 // --- AI engine abstraction ---
 
-const AI_ENGINES = {
-  claude: {
-    command: 'claude',
-    buildArgs(systemPrompt, options = {}) {
-      const args = ['--print'];
-      if (systemPrompt) args.push('--system-prompt', systemPrompt);
-      // Restrict tools to prevent project context leaking into advisory sessions
-      args.push('--tools', '');
-      // Add any extra allowed tools (e.g. web search)
-      if (options.allowedTools && options.allowedTools.length > 0) {
-        args.push('--allowedTools', ...options.allowedTools);
-      }
-      return args;
-    },
-    env() {
-      return { ...process.env, CLAUDECODE: undefined };
-    },
-  },
-  openai: {
-    command: 'codex',
-    buildArgs(systemPrompt, options = {}) {
-      const args = ['--print'];
-      if (systemPrompt) args.push('--system-prompt', systemPrompt);
-      return args;
-    },
-    env() {
-      return { ...process.env };
-    },
-  },
+const ClaudeEngine = require('./engines/claude');
+
+const engines = {
+  claude: new ClaudeEngine(),
 };
 
+let activeEngineName = (process.env.AI_ENGINE || 'claude').toLowerCase();
+
 function getEngine() {
-  const name = (process.env.AI_ENGINE || 'claude').toLowerCase();
-  const engine = AI_ENGINES[name];
+  const engine = engines[activeEngineName];
   if (!engine) {
-    throw new Error(`Unknown AI_ENGINE "${name}". Supported: ${Object.keys(AI_ENGINES).join(', ')}`);
+    throw new Error(`Unknown AI_ENGINE "${activeEngineName}". Supported: ${Object.keys(engines).join(', ')}`);
   }
   return engine;
 }
 
+function setEngine(name) {
+  if (!engines[name]) {
+    throw new Error(`Unknown engine "${name}". Supported: ${Object.keys(engines).join(', ')}`);
+  }
+  activeEngineName = name;
+}
+
+function getAvailableEngines() {
+  return Object.keys(engines).map((name) => ({
+    name,
+    active: name === activeEngineName,
+    capabilities: engines[name].getCapabilities(),
+  }));
+}
+
 function callClaude(prompt, systemPrompt, options = {}) {
-  return new Promise((resolve, reject) => {
-    const engine = getEngine();
-    const args = engine.buildArgs(systemPrompt, options);
+  return getEngine().send(prompt, systemPrompt, options);
+}
 
-    const proc = spawn(engine.command, args, {
-      env: engine.env(),
-    });
-
-    let stdout = '';
-    let stderr = '';
-
-    proc.stdout.on('data', (data) => { stdout += data; });
-    proc.stderr.on('data', (data) => { stderr += data; });
-
-    proc.on('close', (code) => {
-      if (code !== 0) {
-        reject(new Error(`${engine.command} CLI exited with code ${code}: ${stderr}`));
-      } else {
-        resolve(stdout.trim());
-      }
-    });
-
-    proc.on('error', (err) => {
-      reject(new Error(`Failed to spawn ${engine.command} CLI: ${err.message}`));
-    });
-
-    proc.stdin.write(prompt);
-    proc.stdin.end();
-  });
+function callClaudeStreaming(prompt, systemPrompt, options = {}, onChunk) {
+  return getEngine().sendStreaming(prompt, systemPrompt, options, onChunk);
 }
 
 function callClaudeConversation(prompt, systemPrompt, conversationHistory) {
@@ -408,7 +415,8 @@ function callClaudeConversation(prompt, systemPrompt, conversationHistory) {
 }
 
 module.exports = {
-  buildSystemPrompt, callClaude, callClaudeConversation,
+  buildSystemPrompt, callClaude, callClaudeStreaming, callClaudeConversation,
   loadUserContext, loadAgentSpecs, checkUserContextFiles,
-  getLastDiagnostics, generateGoalId,
+  getLastDiagnostics, generateGoalId, DEFAULT_CONTEXT_SOURCES,
+  getEngine, setEngine, getAvailableEngines,
 };

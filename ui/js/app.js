@@ -6,6 +6,20 @@ let cachedEmailData = null;
 let cachedCalendarData = null;
 let lastChatRole = null;
 
+// === Toast System ===
+
+function showToast(message, type = 'info', duration = 4000) {
+  const container = document.getElementById('toast-container');
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  toast.textContent = message;
+  container.appendChild(toast);
+  setTimeout(() => {
+    toast.classList.add('removing');
+    setTimeout(() => toast.remove(), 300);
+  }, duration);
+}
+
 // === Markdown Renderer ===
 
 function renderMarkdown(text) {
@@ -121,6 +135,7 @@ async function loadToday() {
   }
 
   renderCalendarPanel();
+  renderContextSummary();
 }
 
 function renderCalendarPanel() {
@@ -833,27 +848,78 @@ document.getElementById('entries-filter-domain').addEventListener('change', rend
 
 async function loadMemoryOverrides() {
   const container = document.getElementById('memory-overrides');
-  const overrides = await atlas.overrides.getUnresolved();
+  const overrides = await atlas.overrides.getAll();
 
-  if (overrides.length === 0) {
-    container.innerHTML = '<div class="empty-state"><p>No unresolved overrides.</p></div>';
+  if (!overrides || overrides.length === 0) {
+    container.innerHTML = '<div class="empty-state"><p>No overrides recorded.</p></div>';
     return;
   }
 
-  container.innerHTML = overrides.map((o) => `
-    <div class="card">
-      <div class="card-header">
-        <span class="card-title">Override</span>
-        <span class="card-meta">${new Date(o.created_at).toLocaleDateString()}</span>
+  const unresolved = overrides.filter((o) => !o.outcome);
+  const resolved = overrides.filter((o) => o.outcome);
+
+  let html = '';
+
+  if (unresolved.length > 0) {
+    html += '<h3 style="font-size:14px;margin-bottom:12px">Pending Calibration</h3>';
+    html += unresolved.map((o) => `
+      <div class="card" style="border-left:3px solid var(--warning)">
+        <div class="card-header">
+          <span class="card-title">Override</span>
+          <span class="card-meta">${new Date(o.created_at).toLocaleDateString()}</span>
+        </div>
+        <div class="card-body md-content">
+          <div><strong>Atlas recommended:</strong> ${renderMarkdown(o.atlas_recommendation || '')}</div>
+          <div><strong>You decided:</strong> ${renderMarkdown(o.user_decision || '')}</div>
+          ${o.user_reasoning ? `<div><strong>Reasoning:</strong> ${escapeHtml(o.user_reasoning)}</div>` : ''}
+        </div>
+        <div class="btn-group" style="margin-top:8px">
+          <button class="btn btn-sm btn-primary" onclick="calibrateOverride('${o.id}', 'user_right')">I was right</button>
+          <button class="btn btn-sm" onclick="calibrateOverride('${o.id}', 'atlas_right')">Atlas was right</button>
+          <button class="btn btn-sm" onclick="calibrateOverride('${o.id}', 'mixed')">Mixed / unclear</button>
+        </div>
       </div>
-      <div class="card-body md-content">
-        <div><strong>Atlas recommended:</strong> ${renderMarkdown(o.atlas_recommendation)}</div>
-        <div><strong>User decided:</strong> ${renderMarkdown(o.user_decision)}</div>
-        ${o.user_reasoning ? `<div><strong>Reasoning:</strong> ${escapeHtml(o.user_reasoning)}</div>` : ''}
-        <div><strong>Outcome:</strong> ${o.outcome || 'Pending'}</div>
-      </div>
-    </div>
-  `).join('');
+    `).join('');
+  }
+
+  if (resolved.length > 0) {
+    const atlasRight = resolved.filter((o) => o.outcome === 'atlas_right').length;
+    const userRight = resolved.filter((o) => o.outcome === 'user_right').length;
+    const mixed = resolved.filter((o) => o.outcome === 'mixed').length;
+
+    html += `<h3 style="font-size:14px;margin:16px 0 12px">Calibration History</h3>
+      <div class="grid grid-3" style="margin-bottom:12px">
+        <div class="stat-card"><div class="stat-value">${userRight}</div><div class="stat-label">You Were Right</div></div>
+        <div class="stat-card"><div class="stat-value">${atlasRight}</div><div class="stat-label">Atlas Was Right</div></div>
+        <div class="stat-card"><div class="stat-value">${mixed}</div><div class="stat-label">Mixed</div></div>
+      </div>`;
+
+    html += resolved.map((o) => {
+      const outcomeTag = o.outcome === 'user_right' ? 'tag-success' : o.outcome === 'atlas_right' ? 'tag-warning' : 'tag-secondary';
+      const outcomeLabel = o.outcome === 'user_right' ? 'You were right' : o.outcome === 'atlas_right' ? 'Atlas was right' : 'Mixed';
+      return `<div class="list-item">
+        <div class="item-main">
+          <div class="item-title" style="font-size:13px">${escapeHtml((o.user_decision || '').substring(0, 100))}</div>
+          <div class="item-subtitle">
+            <span class="tag ${outcomeTag}">${outcomeLabel}</span>
+            <span style="margin-left:8px">${new Date(o.created_at).toLocaleDateString()}</span>
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  container.innerHTML = html || '<div class="empty-state"><p>No overrides recorded.</p></div>';
+}
+
+async function calibrateOverride(id, outcome) {
+  try {
+    await atlas.overrides.update(id, { outcome });
+    showToast('Override calibrated', 'success');
+    loadMemoryOverrides();
+  } catch (err) {
+    showToast(`Calibration failed: ${err.message}`, 'error');
+  }
 }
 
 // === SESSIONS ===
@@ -952,7 +1018,7 @@ document.getElementById('btn-upload-file').addEventListener('click', async () =>
     const result = await atlas.files.pickAndIngest(null);
     if (result) loadFiles();
   } catch (err) {
-    alert(`Upload failed: ${err.message}`);
+    showToast(`Upload failed: ${err.message}`, 'error');
   }
 });
 
@@ -1024,7 +1090,7 @@ document.getElementById('btn-refresh-email').addEventListener('click', async () 
     cachedEmailData = data;
     renderEmailData(data);
   } catch (err) {
-    alert(`Email fetch failed: ${err.message}`);
+    showToast(`Email fetch failed: ${err.message}`, 'error');
   }
   btn.disabled = false;
   btn.textContent = 'Refresh';
@@ -1043,25 +1109,7 @@ async function loadSettings() {
   }
 }
 
-async function loadSettingsIntegrations() {
-  const container = document.getElementById('settings-integrations');
-  const googleConfigured = await atlas.settings.isGoogleConfigured();
-  container.innerHTML = `
-    <div class="card">
-      <div class="card-header">
-        <span class="card-title">Google Calendar & Gmail</span>
-        <span class="tag ${googleConfigured ? 'tag-success' : 'tag-warning'}">${googleConfigured ? 'Connected' : 'Not connected'}</span>
-      </div>
-      <div class="card-body">${googleConfigured
-        ? 'Google services are connected. Calendar and email data will be included in sessions and briefs.'
-        : 'Not connected. Run the terminal app (<code>npm start</code>) to complete the OAuth setup flow.'}</div>
-    </div>
-    <div class="card">
-      <div class="card-header"><span class="card-title">AI Engine</span><span class="tag tag-primary">Claude</span></div>
-      <div class="card-body">Uses Claude Code CLI. Configure via AI_ENGINE in .env file.</div>
-    </div>
-  `;
-}
+// loadSettingsIntegrations is defined above (near engine settings section)
 
 async function loadSettingsAgents() {
   const container = document.getElementById('settings-agents');
@@ -1159,6 +1207,143 @@ document.querySelectorAll('.modal-overlay').forEach((overlay) => {
     if (e.target === overlay) overlay.classList.remove('active');
   });
 });
+
+// === PDF Export ===
+
+async function exportBriefPDF() {
+  const content = document.getElementById('brief-content').innerHTML;
+  if (!content) {
+    showToast('No brief content to export', 'warning');
+    return;
+  }
+  try {
+    const cardTitle = document.querySelector('#brief-card .card-title');
+    const title = cardTitle ? cardTitle.textContent : 'Brief';
+    const result = await atlas.export.pdf(content, title);
+    if (result) showToast('PDF exported successfully', 'success');
+  } catch (err) {
+    showToast(`PDF export failed: ${err.message}`, 'error');
+  }
+}
+
+// === End-of-Day Reflection ===
+
+document.getElementById('btn-generate-reflection').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-generate-reflection');
+  const loading = document.getElementById('today-loading');
+  const card = document.getElementById('brief-card');
+
+  btn.disabled = true;
+  loading.style.display = 'flex';
+  loading.querySelector('div:last-child') && (loading.innerHTML = '<div class="spinner"></div> Generating reflection...');
+  card.style.display = 'none';
+
+  try {
+    const options = {};
+    if (cachedCalendarData) options.calendarData = cachedCalendarData;
+    if (cachedEmailData) options.emailData = cachedEmailData;
+
+    const reflection = await atlas.brief.reflection(options);
+    if (reflection) {
+      document.getElementById('brief-content').innerHTML = renderMarkdown(reflection);
+      document.getElementById('brief-time').textContent = `Reflection — ${timeNow()}`;
+      card.style.display = 'block';
+      card.querySelector('.card-title').textContent = 'End-of-Day Reflection';
+      showToast('Reflection generated', 'success');
+    } else {
+      document.getElementById('brief-content').textContent = 'No reflection generated. Make sure you have at least one active goal.';
+      card.style.display = 'block';
+    }
+  } catch (err) {
+    showToast(`Reflection error: ${err.message}`, 'error');
+  }
+
+  btn.disabled = false;
+  loading.style.display = 'none';
+});
+
+// === Context Visibility ===
+
+async function renderContextSummary() {
+  const panel = document.getElementById('today-context-summary');
+  const badges = document.getElementById('today-context-badges');
+  const diag = await atlas.settings.getDiagnostics();
+
+  const sources = [
+    { key: 'gmail', label: 'Gmail', icon: '✉' },
+    { key: 'calendar', label: 'Calendar', icon: '📅' },
+    { key: 'files', label: 'Files', icon: '📄' },
+    { key: 'memory', label: 'Memory', icon: '🧠' },
+    { key: 'web_search', label: 'Web Search', icon: '🔍' },
+  ];
+
+  // Check integration availability
+  let googleConfigured = false;
+  try { googleConfigured = await atlas.settings.isGoogleConfigured(); } catch {}
+
+  const sourceStatus = {};
+  if (diag && diag.sourcePolicy) {
+    for (const s of sources) {
+      sourceStatus[s.key] = diag.sourcePolicy[s.key];
+    }
+  }
+
+  badges.innerHTML = sources.map((s) => {
+    const active = sourceStatus[s.key];
+    const unavailable = (s.key === 'gmail' || s.key === 'calendar') && !googleConfigured;
+    const cls = unavailable ? 'inactive' : active ? 'active' : 'inactive';
+    const label = unavailable ? `${s.label} (not configured)` : active ? s.label : `${s.label} (excluded)`;
+    return `<div class="context-badge ${cls}"><span class="badge-dot"></span>${s.icon} ${label}</div>`;
+  }).join('');
+
+  panel.style.display = 'flex';
+  panel.style.flexDirection = 'column';
+}
+
+// === Engine Settings ===
+
+async function loadSettingsIntegrations() {
+  const container = document.getElementById('settings-integrations');
+  const googleConfigured = await atlas.settings.isGoogleConfigured();
+  let engines = [];
+  try { engines = await atlas.settings.getEngines(); } catch {}
+
+  const activeEngine = engines.find((e) => e.active) || { name: 'claude' };
+
+  container.innerHTML = `
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Google Calendar & Gmail</span>
+        <span class="tag ${googleConfigured ? 'tag-success' : 'tag-warning'}">${googleConfigured ? 'Connected' : 'Not connected'}</span>
+      </div>
+      <div class="card-body">${googleConfigured
+        ? 'Google services are connected. Calendar and email data will be included in sessions and briefs.'
+        : 'Not connected. Run the terminal app (<code>npm start</code>) to complete the OAuth setup flow.'}</div>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">AI Engine</span>
+        <span class="tag tag-primary">${escapeHtml(activeEngine.name)}</span>
+      </div>
+      <div class="card-body">
+        <p style="margin-bottom:8px">Current engine: <strong>${escapeHtml(activeEngine.name)}</strong></p>
+        ${engines.length > 1 ? `<div class="btn-group">${engines.map((e) =>
+          `<button class="btn btn-sm ${e.active ? 'btn-primary' : ''}" onclick="switchEngine('${e.name}')"${e.active ? ' disabled' : ''}>${escapeHtml(e.name)}</button>`
+        ).join('')}</div>` : '<p style="color:var(--text-secondary);font-size:12px">Uses Claude Code CLI. Only one engine currently available.</p>'}
+      </div>
+    </div>
+  `;
+}
+
+async function switchEngine(name) {
+  try {
+    await atlas.settings.setEngine(name);
+    showToast(`Engine switched to ${name}`, 'success');
+    loadSettingsIntegrations();
+  } catch (err) {
+    showToast(`Failed to switch engine: ${err.message}`, 'error');
+  }
+}
 
 // === Init ===
 

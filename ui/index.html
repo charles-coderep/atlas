@@ -71,8 +71,13 @@
         <h2 style="font-size:16px;margin-bottom:12px">Today's Schedule</h2>
         <div id="today-calendar-events"></div>
       </div>
+      <div id="today-context-summary" style="display:none;margin-bottom:16px">
+        <h2 style="font-size:16px;margin-bottom:12px">Context Sources</h2>
+        <div id="today-context-badges" class="context-badges"></div>
+      </div>
       <div style="margin-bottom:16px">
         <button class="btn btn-primary" id="btn-generate-brief">Generate Morning Brief</button>
+        <button class="btn" id="btn-generate-reflection">End-of-Day Reflection</button>
         <button class="btn" onclick="navigateTo('chat')">Start Session</button>
       </div>
       <div class="card" id="brief-card" style="display:none">
@@ -83,6 +88,7 @@
         <div class="card-body brief-content md-content" id="brief-content"></div>
         <div class="brief-actions">
           <button class="btn btn-primary" onclick="navigateTo('chat')">Start Session</button>
+          <button class="btn btn-sm" onclick="exportBriefPDF()">Export PDF</button>
         </div>
       </div>
       <div id="today-loading" class="loading" style="display:none">
@@ -272,6 +278,9 @@
       </div>
     </div>
   </div>
+
+  <!-- Toast Container -->
+  <div id="toast-container"></div>
 
   <script src="js/app.js"></script>
 </body>
