@@ -98,6 +98,8 @@ atlas/
 - **Toast system:** `showToast(message, type)` for non-blocking error/success/info notifications
 - **PDF export:** Electron's `printToPDF` generates styled PDF from brief/reflection content
 - **Override calibration:** Users can mark overrides as `user_right`, `atlas_right`, or `mixed` for decision tracking
+- **Streaming responses:** `chat:sendStreaming` IPC pushes chunks via `webContents.send('chat:stream-chunk')` events. Renderer progressively renders markdown with a blinking cursor. Falls back to buffered `chat:send` if needed.
+- **Voice input:** Push-to-talk mic button using Web Speech API (Chromium built-in). Local Whisper fallback via `src/voice.js` if a whisper-cli binary is placed in `config/models/`. Audio captured in renderer, transcribed text inserted into input box.
 - **Diagnostics:** `getLastDiagnostics()` in orchestrator.js tracks context assembly stats including source policies
 
 ## How to Work on This Project

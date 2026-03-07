@@ -315,6 +315,104 @@ Keep it scannable. Under 3 minutes to read. Reference specific past events and c
     return { sessionId, ...result };
   });
 
+  // --- AI: Chat Streaming ---
+  ipcMain.handle('chat:sendStreaming', async (_, message) => {
+    if (!chatSession) return { error: 'No active session' };
+
+    const { callClaudeStreaming, callClaudeConversation } = require('../src/orchestrator');
+    const { webSearch } = require('../src/search');
+    const { searchGmail } = require('../src/integrations/gmail');
+
+    chatHistory.push({ role: 'User', content: message });
+    windowHistory();
+
+    // Build the full prompt with conversation history
+    const historyPrefix = chatHistory.slice(0, -1);
+    const fullPrompt = historyPrefix.length > 0
+      ? `Previous conversation:\n${historyPrefix.map((m) => `${m.role}: ${m.content}`).join('\n')}\n\nUser: ${message}`
+      : message;
+
+    let fullResponse = '';
+    try {
+      fullResponse = await callClaudeStreaming(fullPrompt, chatSystemPrompt, {}, (chunk) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('chat:stream-chunk', chunk);
+        }
+      });
+    } catch (err) {
+      mainWindow.webContents.send('chat:stream-error', err.message);
+      return { error: err.message };
+    }
+
+    // Signal stream complete
+    mainWindow.webContents.send('chat:stream-end');
+
+    // Process markers on the full response
+    const markers = [];
+    const searchPattern = /\[SEARCH:\s*(.+?)\]/g;
+    const recallPattern = /\[RECALL:\s*(.+?)\]/g;
+    const emailPattern = /\[EMAIL_SEARCH:\s*(.+?)\]/g;
+
+    const searchMatches = [...fullResponse.matchAll(searchPattern)];
+    const recallMatches = [...fullResponse.matchAll(recallPattern)];
+    const emailMatches = [...fullResponse.matchAll(emailPattern)];
+
+    if (searchMatches.length > 0 || recallMatches.length > 0 || emailMatches.length > 0) {
+      const contextParts = [];
+      for (const m of searchMatches) {
+        markers.push({ type: 'search', query: m[1].trim() });
+        const result = await webSearch(m[1].trim(), chatSystemPrompt);
+        contextParts.push(`Web search results for "${m[1].trim()}":\n${result}`);
+      }
+      for (const m of emailMatches) {
+        markers.push({ type: 'email_search', query: m[1].trim() });
+        const results = await searchGmail(m[1].trim());
+        if (results.length > 0) {
+          const formatted = results.map((r) => `From: ${r.from}\nSubject: ${r.subject}\nDate: ${r.date}\nPreview: ${r.snippet}`).join('\n\n');
+          contextParts.push(`Email search results for "${m[1].trim()}":\n${formatted}`);
+        }
+      }
+      for (const m of recallMatches) {
+        markers.push({ type: 'recall', query: m[1].trim() });
+        const keywords = m[1].trim().split(/\s+/).filter((w) => w.length > 2);
+        const entries = await db.searchEntries(keywords, 5);
+        if (entries.length > 0) {
+          const context = entries.map((e) => `[${e.date}] [${e.entry_type}] ${e.content}`).join('\n');
+          contextParts.push(`Memory results for "${m[1].trim()}":\n${context}`);
+        }
+      }
+
+      if (contextParts.length > 0) {
+        // For marker follow-up, use buffered call and push the full response
+        const refinedPrompt = `Here is the information you requested:\n\n${contextParts.join('\n\n---\n\n')}\n\nNow incorporate all of this into your advice. Cite what you found. Be specific.`;
+        fullResponse = await callClaudeConversation(refinedPrompt, chatSystemPrompt, chatHistory);
+        mainWindow.webContents.send('chat:stream-replace', fullResponse);
+      }
+    }
+
+    chatHistory.push({ role: 'Atlas', content: fullResponse });
+    return { response: fullResponse, markers };
+  });
+
+  // --- Voice: Transcription ---
+  ipcMain.handle('voice:isAvailable', () => {
+    const { isLocalWhisperAvailable } = require('../src/voice');
+    return isLocalWhisperAvailable();
+  });
+
+  ipcMain.handle('voice:transcribe', async (_, audioBuffer) => {
+    const { saveTempWav, transcribeLocal, cleanupTempFile } = require('../src/voice');
+    const tmpPath = saveTempWav(audioBuffer);
+    try {
+      const text = await transcribeLocal(tmpPath);
+      return { text };
+    } catch (err) {
+      return { error: err.message };
+    } finally {
+      cleanupTempFile(tmpPath);
+    }
+  });
+
   // --- Search ---
   ipcMain.handle('search:web', async (_, query) => {
     const { webSearch } = require('../src/search');

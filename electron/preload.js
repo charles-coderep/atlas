@@ -64,7 +64,24 @@ contextBridge.exposeInMainWorld('atlas', {
   chat: {
     start: (options) => ipcRenderer.invoke('chat:start', options),
     send: (message) => ipcRenderer.invoke('chat:send', message),
+    sendStreaming: (message) => ipcRenderer.invoke('chat:sendStreaming', message),
     end: () => ipcRenderer.invoke('chat:end'),
+    onStreamChunk: (callback) => ipcRenderer.on('chat:stream-chunk', (_, chunk) => callback(chunk)),
+    onStreamEnd: (callback) => ipcRenderer.on('chat:stream-end', () => callback()),
+    onStreamError: (callback) => ipcRenderer.on('chat:stream-error', (_, err) => callback(err)),
+    onStreamReplace: (callback) => ipcRenderer.on('chat:stream-replace', (_, text) => callback(text)),
+    removeStreamListeners: () => {
+      ipcRenderer.removeAllListeners('chat:stream-chunk');
+      ipcRenderer.removeAllListeners('chat:stream-end');
+      ipcRenderer.removeAllListeners('chat:stream-error');
+      ipcRenderer.removeAllListeners('chat:stream-replace');
+    },
+  },
+
+  // Voice
+  voice: {
+    isAvailable: () => ipcRenderer.invoke('voice:isAvailable'),
+    transcribe: (audioBuffer) => ipcRenderer.invoke('voice:transcribe', audioBuffer),
   },
 
   // Search

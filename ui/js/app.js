@@ -5,6 +5,10 @@ let chatActive = false;
 let cachedEmailData = null;
 let cachedCalendarData = null;
 let lastChatRole = null;
+let streamingMessageEl = null;
+let streamingContent = '';
+let voiceRecognition = null;
+let isRecording = false;
 
 // === Toast System ===
 
@@ -272,29 +276,100 @@ async function sendChatMessage() {
   document.getElementById('btn-chat-send').disabled = true;
 
   appendChatMessage('chat-messages', 'user', message);
+
+  // Set up streaming listeners before sending
+  streamingContent = '';
+  streamingMessageEl = null;
+
+  atlas.chat.removeStreamListeners();
+
+  atlas.chat.onStreamChunk((chunk) => {
+    streamingContent += chunk;
+    if (!streamingMessageEl) {
+      // Create the message element on first chunk
+      streamingMessageEl = appendChatMessage('chat-messages', 'atlas', '');
+      streamingMessageEl.classList.add('streaming');
+    }
+    const contentEl = streamingMessageEl.querySelector('.msg-content');
+    if (contentEl) {
+      contentEl.innerHTML = renderMarkdown(streamingContent);
+      contentEl.classList.add('streaming-cursor');
+    }
+    const messages = document.getElementById('chat-messages');
+    messages.scrollTop = messages.scrollHeight;
+  });
+
+  atlas.chat.onStreamEnd(() => {
+    if (streamingMessageEl) {
+      const contentEl = streamingMessageEl.querySelector('.msg-content');
+      if (contentEl) {
+        contentEl.innerHTML = renderMarkdown(streamingContent);
+        contentEl.classList.remove('streaming-cursor');
+      }
+      streamingMessageEl.classList.remove('streaming');
+    }
+    streamingMessageEl = null;
+    streamingContent = '';
+    input.disabled = false;
+    document.getElementById('btn-chat-send').disabled = false;
+    input.focus();
+  });
+
+  atlas.chat.onStreamError((err) => {
+    if (streamingMessageEl) {
+      removeTypingIndicator(streamingMessageEl);
+      streamingMessageEl = null;
+    }
+    appendChatMessage('chat-messages', 'system', `Error: ${err}`);
+    streamingContent = '';
+    input.disabled = false;
+    document.getElementById('btn-chat-send').disabled = false;
+    input.focus();
+  });
+
+  atlas.chat.onStreamReplace((fullText) => {
+    // Marker follow-up replaced the streaming content
+    if (streamingMessageEl) {
+      const contentEl = streamingMessageEl.querySelector('.msg-content');
+      if (contentEl) {
+        contentEl.innerHTML = renderMarkdown(fullText);
+        contentEl.classList.remove('streaming-cursor');
+      }
+      streamingMessageEl.classList.remove('streaming');
+    }
+  });
+
   const thinkingEl = showTypingIndicator('chat-messages');
 
   try {
-    const result = await atlas.chat.send(message);
+    const result = await atlas.chat.sendStreaming(message);
 
-    // Show markers above the response
-    if (result.markers && result.markers.length > 0) {
+    // Remove typing indicator (streaming content replaced it)
+    removeTypingIndicator(thinkingEl);
+
+    // Show markers if any
+    if (result && result.markers && result.markers.length > 0) {
       for (const m of result.markers) {
-        const markerDiv = document.createElement('div');
-        markerDiv.className = 'chat-marker';
-        markerDiv.textContent = `${m.type === 'search' ? 'Web search' : m.type === 'recall' ? 'Memory recall' : 'Email search'}: ${m.query}`;
-        thinkingEl.before(markerDiv);
+        showToast(`${m.type === 'search' ? 'Web search' : m.type === 'recall' ? 'Memory recall' : 'Email search'}: ${m.query}`, 'info', 3000);
       }
     }
 
-    // Replace typing indicator with actual message
-    removeTypingIndicator(thinkingEl);
-    appendChatMessage('chat-messages', 'atlas', result.response || result.error);
+    // If streaming didn't create a message (e.g. error path), show buffered
+    if (!streamingMessageEl && result && result.response) {
+      appendChatMessage('chat-messages', 'atlas', result.response);
+    }
   } catch (err) {
     removeTypingIndicator(thinkingEl);
+    if (streamingMessageEl) {
+      streamingMessageEl.remove();
+      streamingMessageEl = null;
+    }
     appendChatMessage('chat-messages', 'system', `Error: ${err.message}`);
   }
 
+  atlas.chat.removeStreamListeners();
+  streamingMessageEl = null;
+  streamingContent = '';
   input.disabled = false;
   document.getElementById('btn-chat-send').disabled = false;
   input.focus();
@@ -1109,8 +1184,6 @@ async function loadSettings() {
   }
 }
 
-// loadSettingsIntegrations is defined above (near engine settings section)
-
 async function loadSettingsAgents() {
   const container = document.getElementById('settings-agents');
   const specs = await atlas.settings.getAgentSpecs();
@@ -1345,10 +1418,126 @@ async function switchEngine(name) {
   }
 }
 
+// === Voice Input (Push-to-Talk) ===
+
+function initVoice() {
+  // Use Web Speech API (built into Chromium)
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) {
+    console.log('[Voice] Web Speech API not available');
+    // Hide mic buttons
+    document.querySelectorAll('.btn-mic').forEach((btn) => { btn.style.display = 'none'; });
+    return;
+  }
+
+  voiceRecognition = new SpeechRecognition();
+  voiceRecognition.continuous = false;
+  voiceRecognition.interimResults = true;
+  voiceRecognition.lang = 'en-GB';
+
+  // Wire mic buttons
+  document.getElementById('btn-chat-mic').addEventListener('mousedown', () => startVoice('chat-input'));
+  document.getElementById('btn-chat-mic').addEventListener('mouseup', stopVoice);
+  document.getElementById('btn-chat-mic').addEventListener('mouseleave', stopVoice);
+
+  document.getElementById('btn-goal-mic').addEventListener('mousedown', () => startVoice('goal-interview-input'));
+  document.getElementById('btn-goal-mic').addEventListener('mouseup', stopVoice);
+  document.getElementById('btn-goal-mic').addEventListener('mouseleave', stopVoice);
+
+  // Touch support for mobile/tablet
+  document.getElementById('btn-chat-mic').addEventListener('touchstart', (e) => { e.preventDefault(); startVoice('chat-input'); });
+  document.getElementById('btn-chat-mic').addEventListener('touchend', (e) => { e.preventDefault(); stopVoice(); });
+
+  document.getElementById('btn-goal-mic').addEventListener('touchstart', (e) => { e.preventDefault(); startVoice('goal-interview-input'); });
+  document.getElementById('btn-goal-mic').addEventListener('touchend', (e) => { e.preventDefault(); stopVoice(); });
+}
+
+let voiceTargetInput = null;
+let voiceInterimText = '';
+
+function startVoice(inputId) {
+  if (!voiceRecognition || isRecording) return;
+  voiceTargetInput = document.getElementById(inputId);
+  if (!voiceTargetInput) return;
+
+  isRecording = true;
+  voiceInterimText = '';
+
+  // Highlight the active mic button
+  document.querySelectorAll('.btn-mic').forEach((btn) => {
+    if (btn.closest('.chat-input-bar')?.contains(voiceTargetInput)) {
+      btn.classList.add('recording');
+    }
+  });
+
+  voiceRecognition.onresult = (event) => {
+    let interim = '';
+    let final = '';
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const transcript = event.results[i][0].transcript;
+      if (event.results[i].isFinal) {
+        final += transcript;
+      } else {
+        interim += transcript;
+      }
+    }
+
+    // Append final text to input, show interim as placeholder
+    if (final) {
+      const existing = voiceTargetInput.value;
+      voiceTargetInput.value = existing + (existing ? ' ' : '') + final.trim();
+      voiceInterimText = '';
+    }
+    if (interim) {
+      voiceInterimText = interim;
+      voiceTargetInput.placeholder = interim + '...';
+    }
+  };
+
+  voiceRecognition.onerror = (event) => {
+    if (event.error === 'not-allowed') {
+      showToast('Microphone access denied. Check browser permissions.', 'error');
+    } else if (event.error !== 'aborted' && event.error !== 'no-speech') {
+      showToast(`Voice error: ${event.error}`, 'warning');
+    }
+    stopVoice();
+  };
+
+  voiceRecognition.onend = () => {
+    stopVoice();
+  };
+
+  try {
+    voiceRecognition.start();
+  } catch (err) {
+    showToast('Could not start voice input', 'error');
+    stopVoice();
+  }
+}
+
+function stopVoice() {
+  if (!isRecording) return;
+  isRecording = false;
+
+  document.querySelectorAll('.btn-mic').forEach((btn) => btn.classList.remove('recording'));
+
+  if (voiceTargetInput) {
+    voiceTargetInput.placeholder = voiceTargetInput.id === 'chat-input' ? 'Type your message...' : 'Describe your goal...';
+  }
+
+  try {
+    if (voiceRecognition) voiceRecognition.stop();
+  } catch {}
+
+  voiceTargetInput = null;
+  voiceInterimText = '';
+}
+
 // === Init ===
 
 async function init() {
   await loadToday();
+  initVoice();
 
   try {
     cachedCalendarData = await atlas.calendar.fetch();
