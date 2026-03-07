@@ -50,7 +50,15 @@ app.on('window-all-closed', () => {
 
 function registerIPC() {
   // --- DB: Goals ---
-  ipcMain.handle('goals:getActive', () => db.getActiveGoals());
+  ipcMain.handle('goals:getActive', async () => {
+    const goals = await db.getActiveGoals();
+    console.log('[IPC] goals:getActive returned', goals.length, 'goals');
+    if (goals.length === 0) {
+      const all = await db.getAllGoals();
+      console.log('[IPC] All goals:', all.map(g => `${g.id}="${g.title}" status=${g.status}`).join(' | '));
+    }
+    return goals;
+  });
   ipcMain.handle('goals:getAll', () => db.getAllGoals());
   ipcMain.handle('goals:get', (_, id) => db.getGoal(id));
   ipcMain.handle('goals:save', (_, goal) => db.saveGoal(goal));
@@ -113,11 +121,16 @@ function registerIPC() {
     const { getOpenActions, getOverdueActions } = db;
 
     const goals = await getActiveGoals();
+    const allGoals = await db.getAllGoals();
+    console.log('[Brief] Active goals:', goals.length, '| All goals:', allGoals.length);
+    console.log('[Brief] Goal statuses:', allGoals.map(g => `${g.id}: ${g.status}`).join(', '));
     if (goals.length === 0) return null;
 
     const systemPrompt = await buildSystemPrompt(goals, options || {});
+    console.log('[Brief] System prompt length:', systemPrompt.length);
     const openActions = await getOpenActions();
     const overdueActions = await getOverdueActions();
+    console.log('[Brief] Actions:', openActions.length, 'open,', overdueActions.length, 'overdue');
 
     const today = new Date().toLocaleDateString('en-GB', {
       weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
@@ -147,7 +160,15 @@ ${numberedSections}
 
 Keep it scannable. Under 3 minutes to read. Reference specific past events and commitments.`;
 
-    return await callClaude(briefPrompt, systemPrompt);
+    console.log('[Brief] Calling Claude CLI...');
+    try {
+      const result = await callClaude(briefPrompt, systemPrompt);
+      console.log('[Brief] Response length:', result ? result.length : 0);
+      return result;
+    } catch (err) {
+      console.error('[Brief] Claude CLI error:', err.message);
+      throw err;
+    }
   });
 
   // --- AI: Chat ---
@@ -480,6 +501,9 @@ Return ONLY valid JSON. No explanation.`;
       goal_data: goalData,
       status: 'active',
     });
+    // Force status to active in case upsert didn't update it
+    await db.updateGoalStatus(id, 'active');
+    console.log('[Interview] Goal saved:', id, goalData.title);
 
     interviewHistory = [];
     interviewMode = null;

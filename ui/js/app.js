@@ -168,8 +168,12 @@ document.getElementById('btn-generate-brief').addEventListener('click', async ()
       document.getElementById('brief-content').innerHTML = renderMarkdown(brief);
       document.getElementById('brief-time').textContent = timeNow();
       card.style.display = 'block';
+    } else {
+      document.getElementById('brief-content').textContent = 'No brief generated. Make sure you have at least one active goal.';
+      card.style.display = 'block';
     }
   } catch (err) {
+    console.error('Brief generation error:', err);
     document.getElementById('brief-content').textContent = `Error: ${err.message}`;
     card.style.display = 'block';
   }
