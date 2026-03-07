@@ -325,6 +325,7 @@ function removeTypingIndicator(el) {
 // === GOALS ===
 
 let goalInterviewActive = false;
+let goalInterviewExchanges = 0;
 
 async function loadGoals() {
   if (goalInterviewActive) return;
@@ -386,6 +387,8 @@ async function startGoalInterview(goalId) {
   document.getElementById('goal-interview-panel').style.display = 'flex';
   document.getElementById('goal-interview-messages').innerHTML = '';
   document.getElementById('goal-interview-title').textContent = isEdit ? 'Updating goal...' : 'Defining a new goal...';
+  document.getElementById('btn-goal-interview-save').style.display = 'none';
+  goalInterviewExchanges = 0;
 
   const typingEl = showTypingIndicator('goal-interview-messages');
 
@@ -461,6 +464,12 @@ async function sendGoalInterviewMessage() {
     const result = await atlas.interview.send(message);
     removeTypingIndicator(typingEl);
     appendInterviewMessage('atlas', result.response);
+    goalInterviewExchanges++;
+
+    // Show manual save button after 2+ exchanges as a fallback
+    if (goalInterviewExchanges >= 2) {
+      document.getElementById('btn-goal-interview-save').style.display = '';
+    }
 
     if (result.isReady) {
       // Goal is ready — save it
@@ -494,6 +503,36 @@ async function sendGoalInterviewMessage() {
   document.getElementById('btn-goal-interview-send').disabled = false;
   input.focus();
 }
+
+// Manual save button — fallback when GOAL_READY isn't triggered
+document.getElementById('btn-goal-interview-save').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-goal-interview-save');
+  btn.disabled = true;
+  btn.textContent = 'Saving...';
+  document.getElementById('goal-interview-input').disabled = true;
+  document.getElementById('btn-goal-interview-send').disabled = true;
+
+  const typingEl = showTypingIndicator('goal-interview-messages');
+
+  try {
+    const saved = await atlas.interview.complete();
+    removeTypingIndicator(typingEl);
+    appendInterviewMessage('system', `Goal "${saved.title}" saved successfully.`);
+
+    setTimeout(() => {
+      cancelGoalInterview();
+      loadToday();
+    }, 1500);
+  } catch (err) {
+    removeTypingIndicator(typingEl);
+    appendInterviewMessage('system', `Error saving goal: ${err.message}`);
+    document.getElementById('goal-interview-input').disabled = false;
+    document.getElementById('btn-goal-interview-send').disabled = false;
+  }
+
+  btn.disabled = false;
+  btn.textContent = 'Save Goal';
+});
 
 // === ACTIONS ===
 
