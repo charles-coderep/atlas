@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Atlas</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+  <!-- Sidebar -->
+  <nav class="sidebar">
+    <div class="sidebar-brand">ATLAS</div>
+    <div class="sidebar-nav">
+      <div class="nav-item active" data-screen="today">
+        <span class="nav-icon">&#9679;</span> Today
+      </div>
+      <div class="nav-item" data-screen="chat">
+        <span class="nav-icon">&#9998;</span> Talk to Atlas
+      </div>
+      <div class="nav-item" data-screen="goals">
+        <span class="nav-icon">&#9733;</span> Goals
+      </div>
+      <div class="nav-item" data-screen="actions">
+        <span class="nav-icon">&#10003;</span> Actions
+        <span class="badge" id="overdue-badge" style="display:none"></span>
+      </div>
+      <div class="nav-item" data-screen="memory">
+        <span class="nav-icon">&#9881;</span> Memory
+      </div>
+      <div class="nav-item" data-screen="sessions">
+        <span class="nav-icon">&#128337;</span> Sessions
+      </div>
+      <div class="nav-item" data-screen="files">
+        <span class="nav-icon">&#128196;</span> Files
+      </div>
+      <div class="nav-item" data-screen="email">
+        <span class="nav-icon">&#9993;</span> Email
+      </div>
+      <div class="nav-item" data-screen="settings">
+        <span class="nav-icon">&#9881;</span> Settings
+      </div>
+    </div>
+    <div class="sidebar-footer">Atlas v2.0</div>
+  </nav>
+
+  <!-- Main Content -->
+  <div class="main">
+
+    <!-- TODAY SCREEN -->
+    <div class="screen active" id="screen-today">
+      <div class="screen-header">
+        <h1>Today</h1>
+        <p id="today-date"></p>
+      </div>
+      <div class="grid grid-3" style="margin-bottom:20px">
+        <div class="stat-card">
+          <div class="stat-value" id="stat-goals">-</div>
+          <div class="stat-label">Active Goals</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="stat-actions">-</div>
+          <div class="stat-label">Open Actions</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="stat-overdue" style="color:var(--danger)">-</div>
+          <div class="stat-label">Overdue</div>
+        </div>
+      </div>
+      <div id="today-calendar" style="display:none;margin-bottom:16px">
+        <h2 style="font-size:16px;margin-bottom:12px">Today's Schedule</h2>
+        <div id="today-calendar-events"></div>
+      </div>
+      <div style="margin-bottom:16px">
+        <button class="btn btn-primary" id="btn-generate-brief">Generate Morning Brief</button>
+        <button class="btn" onclick="navigateTo('chat')">Start Session</button>
+      </div>
+      <div class="card" id="brief-card" style="display:none">
+        <div class="card-header">
+          <span class="card-title">Morning Brief</span>
+          <span class="card-meta" id="brief-time"></span>
+        </div>
+        <div class="card-body brief-content md-content" id="brief-content"></div>
+        <div class="brief-actions">
+          <button class="btn btn-primary" onclick="navigateTo('chat')">Start Session</button>
+        </div>
+      </div>
+      <div id="today-loading" class="loading" style="display:none">
+        <div class="spinner"></div> Generating brief...
+      </div>
+    </div>
+
+    <!-- CHAT SCREEN -->
+    <div class="screen" id="screen-chat">
+      <div class="chat-container">
+        <div class="screen-header" style="display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <h1>Talk to Atlas</h1>
+            <p id="chat-status">Start a session to begin.</p>
+          </div>
+          <div class="btn-group">
+            <button class="btn btn-primary" id="btn-chat-start">Start Session</button>
+            <button class="btn btn-danger" id="btn-chat-end" style="display:none">End Session</button>
+          </div>
+        </div>
+        <div class="chat-messages" id="chat-messages"></div>
+        <div class="chat-input-bar" id="chat-input-bar" style="display:none">
+          <input type="text" class="chat-input" id="chat-input" placeholder="Type your message..." autocomplete="off">
+          <button class="btn btn-primary" id="btn-chat-send">Send</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- GOALS SCREEN -->
+    <div class="screen" id="screen-goals">
+      <div class="screen-header" style="display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <h1>Goals</h1>
+          <p>Your active goals and their status.</p>
+        </div>
+        <button class="btn btn-primary" id="btn-new-goal">New Goal</button>
+      </div>
+      <!-- Goal list (hidden during interview) -->
+      <div id="goals-list"></div>
+      <!-- Goal conversation panel (hidden by default) -->
+      <div id="goal-interview-panel" class="conversation-panel" style="display:none">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <span style="font-size:14px;color:var(--text-secondary)" id="goal-interview-title">Defining a new goal...</span>
+          <button class="btn btn-sm" id="btn-cancel-interview" onclick="cancelGoalInterview()">Cancel</button>
+        </div>
+        <div class="chat-messages" id="goal-interview-messages"></div>
+        <div class="chat-input-bar" id="goal-interview-input-bar">
+          <input type="text" class="chat-input" id="goal-interview-input" placeholder="Describe your goal..." autocomplete="off">
+          <button class="btn btn-primary" id="btn-goal-interview-send">Send</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ACTIONS SCREEN -->
+    <div class="screen" id="screen-actions">
+      <div class="screen-header">
+        <h1>Actions</h1>
+        <p>Track commitments and follow through.</p>
+      </div>
+      <div class="filter-bar">
+        <select class="form-select" id="actions-filter-status">
+          <option value="open">Open</option>
+          <option value="completed">Completed</option>
+          <option value="all">All</option>
+        </select>
+        <select class="form-select" id="actions-filter-goal">
+          <option value="">All Goals</option>
+        </select>
+      </div>
+      <div id="actions-list"></div>
+    </div>
+
+    <!-- MEMORY SCREEN -->
+    <div class="screen" id="screen-memory">
+      <div class="screen-header">
+        <h1>Memory</h1>
+        <p>What Atlas knows and remembers.</p>
+      </div>
+      <div class="tabs">
+        <div class="tab active" data-tab="memory-context">User Context</div>
+        <div class="tab" data-tab="memory-entries">Entries</div>
+        <div class="tab" data-tab="memory-overrides">Overrides</div>
+      </div>
+      <div id="memory-context" class="tab-content active"></div>
+      <div id="memory-entries" class="tab-content" style="display:none">
+        <div class="filter-bar" style="margin-bottom:12px">
+          <input type="text" class="form-input" id="entries-search" placeholder="Search entries..." style="flex:1">
+          <select class="form-select" id="entries-filter-type">
+            <option value="">All Types</option>
+            <option value="insight">Insight</option>
+            <option value="decision">Decision</option>
+            <option value="commitment">Commitment</option>
+            <option value="concern">Concern</option>
+            <option value="progress">Progress</option>
+            <option value="context">Context</option>
+          </select>
+          <select class="form-select" id="entries-filter-domain">
+            <option value="">All Domains</option>
+            <option value="career">Career</option>
+            <option value="financial">Financial</option>
+            <option value="learning">Learning</option>
+            <option value="health">Health</option>
+            <option value="business">Business</option>
+            <option value="personal">Personal</option>
+            <option value="strategic">Strategic</option>
+          </select>
+        </div>
+        <div id="entries-list-container"></div>
+      </div>
+      <div id="memory-overrides" class="tab-content" style="display:none"></div>
+    </div>
+
+    <!-- SESSIONS SCREEN -->
+    <div class="screen" id="screen-sessions">
+      <div class="screen-header">
+        <h1>Sessions</h1>
+        <p>History of advisory conversations.</p>
+      </div>
+      <div id="sessions-list"></div>
+    </div>
+
+    <!-- FILES SCREEN -->
+    <div class="screen" id="screen-files">
+      <div class="screen-header" style="display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <h1>Files</h1>
+          <p>Documents ingested into Atlas.</p>
+        </div>
+        <button class="btn btn-primary" id="btn-upload-file">Upload File</button>
+      </div>
+      <div id="files-list"></div>
+    </div>
+
+    <!-- EMAIL SCREEN -->
+    <div class="screen" id="screen-email">
+      <div class="screen-header" style="display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <h1>Email</h1>
+          <p>Goal-relevant emails from your inbox.</p>
+        </div>
+        <button class="btn" id="btn-refresh-email">Refresh</button>
+      </div>
+      <div class="grid grid-3" style="margin-bottom:16px" id="email-stats"></div>
+      <div id="email-list"></div>
+    </div>
+
+    <!-- SETTINGS SCREEN -->
+    <div class="screen" id="screen-settings">
+      <div class="screen-header">
+        <h1>Settings</h1>
+        <p>Configuration and diagnostics.</p>
+      </div>
+      <div class="tabs">
+        <div class="tab active" data-tab="settings-integrations">Integrations</div>
+        <div class="tab" data-tab="settings-agents">Advisory Perspectives</div>
+        <div class="tab" data-tab="settings-methodology">Methodology</div>
+        <div class="tab" data-tab="settings-diagnostics">Diagnostics</div>
+      </div>
+      <div id="settings-integrations" class="tab-content active"></div>
+      <div id="settings-agents" class="tab-content" style="display:none"></div>
+      <div id="settings-methodology" class="tab-content" style="display:none"></div>
+      <div id="settings-diagnostics" class="tab-content" style="display:none"></div>
+    </div>
+
+  </div>
+
+  <!-- Context Interview Modal -->
+  <div class="modal-overlay" id="modal-context-interview">
+    <div class="modal" style="max-width:640px;max-height:85vh;display:flex;flex-direction:column">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <div class="modal-title" id="context-interview-title" style="margin-bottom:0">Update Context</div>
+        <button class="btn btn-sm" onclick="closeModal('modal-context-interview')">Close</button>
+      </div>
+      <div class="chat-messages" id="context-interview-messages" style="flex:1;overflow-y:auto;min-height:200px"></div>
+      <div id="context-interview-proposed" style="display:none;margin:12px 0">
+        <p style="font-size:12px;color:var(--text-secondary);margin-bottom:8px">Proposed update:</p>
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;max-height:200px;overflow-y:auto;font-size:12px;font-family:var(--font-mono);white-space:pre-wrap" id="context-proposed-content"></div>
+        <div class="btn-group" style="margin-top:8px">
+          <button class="btn btn-primary btn-sm" id="btn-context-accept">Accept & Save</button>
+          <button class="btn btn-sm" id="btn-context-revise">Ask for Changes</button>
+        </div>
+      </div>
+      <div class="chat-input-bar" id="context-interview-input-bar">
+        <input type="text" class="chat-input" id="context-interview-input" placeholder="Tell Atlas about yourself..." autocomplete="off">
+        <button class="btn btn-primary" id="btn-context-interview-send">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/app.js"></script>
+</body>
+</html>

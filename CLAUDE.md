@@ -2,99 +2,101 @@
 
 ## What This Project Is
 
-Project Atlas is a local-first Electron desktop application that serves as a strategic adviser. Read `ATLAS_SPEC.md` for the full vision document. That file is your reference for design philosophy, behavioural rules, memory architecture, and the complete product definition.
+Project Atlas is a strategic adviser application with both terminal and desktop (Electron) interfaces. See `docs/PROJECT_ATLAS_v5.md` for the full vision document.
 
-**Do not try to build the whole spec at once.** Atlas is built in phases. Each phase is independently valuable. Check the current build phase below and scope your work accordingly.
-
----
-
-## Current Build Phase: Phase 1 — Foundation
-
-See `PHASE_1_BUILD.md` for the detailed build instruction for this phase.
-
-**Phase 1 scope — build ONLY these things:**
-- Project folder structure and config files
-- Goal-definition interview (text-based, conversational)
-- Supabase (PostgreSQL) database with goals table
-- Morning brief generation using Claude Code CLI with subagents
-- Basic terminal interface for advisory sessions
-- Text input/output (voice input deferred to later in Phase 1 or Phase 2)
-
-**Phase 1 explicitly excludes:**
-- Electron app (Phase 4)
-- Full memory layer with entries/actions/overrides tables (Phase 2)
-- Vector embeddings and semantic search (Phase 2)
-- Post-session processing and persistence scoring (Phase 2)
-- Gmail/Calendar API integration (Phase 3)
-- Web search during sessions (Phase 3)
-- Dual-AI deliberation (Phase 5)
-- Any UI beyond terminal output
+**Phases 1–4 are complete.** Foundation, memory layer, dynamic retrieval, and Electron UI are all built. UX corrections applied for conversation-first interaction model.
 
 ---
 
 ## Project Structure
 
 ```
-project-atlas/
-├── CLAUDE.md                    # This file — you read it automatically
-├── ATLAS_SPEC.md                # Full vision document (reference only)
-├── PHASE_1_BUILD.md             # Current phase build instructions
+atlas/
+├── CLAUDE.md                    # This file
+├── docs/                        # Build specs and planning documents (reference only)
 ├── config/
 │   ├── agents/                  # Subagent spec files
-│   │   ├── job-search.md
-│   │   ├── financial.md
-│   │   ├── day-planner.md
-│   │   ├── learning.md
-│   │   └── meta-analyst.md
 │   ├── engine/
-│   │   └── methodology.md       # Advisory methodology (placeholder, parallel workstream)
+│   │   └── methodology.md       # Advisory methodology
+│   ├── credentials/             # Google OAuth credentials (not committed)
 │   └── user/
 │       ├── IDENTITY.md          # User's stable identity context
 │       ├── SITUATION.md         # User's current situation
 │       └── PREFERENCES.md       # User's advisory preferences
+├── electron/
+│   ├── main.js                  # Electron main process + IPC handlers
+│   └── preload.js               # Context bridge for renderer
+├── ui/
+│   ├── index.html               # Single-page app shell
+│   ├── css/style.css            # UI styles
+│   └── js/app.js                # Frontend application logic
 ├── src/
-│   ├── interview.js             # Goal-definition interview logic
+│   ├── index.js                 # Terminal entry point and menu
+│   ├── interview.js             # Goal-definition interview
 │   ├── brief.js                 # Morning brief generation
-│   ├── session.js               # Advisory session manager
-│   ├── db.js                    # Supabase client setup and queries
-│   └── orchestrator.js          # Subagent orchestration (hidden layer)
-├── .env                         # Supabase URL and anon key (not committed)
+│   ├── session.js               # Advisory session manager (terminal)
+│   ├── processor.js             # Post-session processing
+│   ├── search.js                # Web search wrapper
+│   ├── files.js                 # File ingestion
+│   ├── db.js                    # Supabase client and queries
+│   ├── orchestrator.js          # System prompt builder and AI engine
+│   ├── setup.js                 # Google OAuth setup flow
+│   └── integrations/
+│       ├── calendar.js          # Google Calendar integration
+│       └── gmail.js             # Gmail integration (6-layer pipeline)
+├── .env                         # Supabase URL, anon key, AI_ENGINE (not committed)
 └── package.json
 ```
 
 ---
 
-## Key Design Principles (Always Follow These)
+## Running
 
-1. **One visible entity.** The user talks to Atlas. Subagents are invisible. Never expose agent names, orchestration details, or multi-model internals to the user.
-
-2. **Direct over exploratory.** Default to giving a clear recommendation with reasoning. Don't ask "what do you think?" when you have enough data to advise. See ATLAS_SPEC.md Section 6.1, Rule 3.
-
-3. **Specific over generic.** Never give advice that could apply to anyone. Ground everything in the user's actual data, goals, and situation. See ATLAS_SPEC.md Section 6.1, Rule 4.
-
-4. **Goal protection by default.** Protect declared goals. Push back on drift. But revise when genuine evidence warrants it. See ATLAS_SPEC.md Section 6.2.
-
-5. **Concise.** No walls of text. Briefs scannable in under 3 minutes. Responses conversational and practical.
-
-6. **Cross-goal awareness.** Never isolate goals into separate contexts. The best advice comes from seeing connections between goals.
+- **Terminal:** `npm start` — original terminal interface
+- **Desktop app:** `npm run app` — Electron UI
 
 ---
 
-## Tech Stack (Phase 1)
+## Key Design Principles
+
+1. **One visible entity.** The user talks to Atlas. Subagents are invisible.
+2. **Conversation-first.** Goal creation, editing, and context updates happen through natural conversation, not forms.
+3. **Direct over exploratory.** Default to a clear recommendation with reasoning.
+4. **Specific over generic.** Ground everything in the user's actual data and goals.
+5. **Goal protection by default.** Protect declared goals. Push back on drift.
+6. **Concise.** No walls of text. Briefs scannable in under 3 minutes.
+7. **Cross-goal awareness.** See connections between goals.
+
+---
+
+## Tech Stack
 
 - **Runtime:** Node.js
+- **Desktop:** Electron
 - **Database:** Supabase (hosted PostgreSQL) via `@supabase/supabase-js`
-- **AI:** Claude Code CLI (spawned as child process)
-- **Interface:** Terminal (text in, text out)
-- **Voice:** Deferred (Web Speech API or Whisper local, added later in Phase 1 or Phase 2)
+- **AI:** Claude Code CLI (spawned as child process with `--tools ''` to prevent project context leaking)
+- **Integrations:** Google Calendar, Gmail (optional, OAuth setup via terminal)
 
 ---
+
+## Architecture Notes
+
+- **IPC flow:** `electron/main.js` handles all IPC between renderer and Node.js backend
+- **AI calls:** `src/orchestrator.js` spawns Claude CLI as child process. System prompt assembled with deterministic trimming (6000 token ceiling)
+- **Context ranking:** Email > Calendar > Recent entries > Sessions > Persistent memory (by priority)
+- **Markers:** Atlas can output `[SEARCH: query]`, `[RECALL: topic]`, `[EMAIL_SEARCH: query]` during chat — main.js intercepts and fulfills these
+- **Goal interview:** Conversational flow via `interview:start` → `interview:send` → `interview:complete` IPC chain
+- **Context interview:** Conversational context file updates via `context:interview` IPC handler
+- **Markdown rendering:** All Atlas output rendered as formatted HTML via `renderMarkdown()` in app.js
+- **Diagnostics:** `getLastDiagnostics()` in orchestrator.js tracks context assembly stats
 
 ## How to Work on This Project
 
-1. Read this file first (you're doing that now).
-2. Read `PHASE_1_BUILD.md` for your current build instructions.
-3. Reference `ATLAS_SPEC.md` when you need design context, behavioural rules, or architecture details.
-4. Reference `config/agents/*.md` when implementing subagent orchestration.
-5. Reference `config/user/*.md` when you need the user's context for generating briefs or advice.
-6. Stay within Phase 1 scope. If you think something from a later phase is needed, flag it — don't build it.
+1. Read this file first.
+2. Check `docs/` for build specs if you need historical context.
+3. Reference `config/agents/*.md` for subagent perspectives.
+4. Reference `config/user/*.md` for user context.
+5. Reference `config/engine/methodology.md` for advisory methodology.
+6. `electron/main.js` contains all IPC handlers bridging UI to backend.
+7. `ui/js/app.js` is the main frontend logic.
+8. All Atlas output surfaces must use `renderMarkdown()` — never `textContent` for Atlas responses.
