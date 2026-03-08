@@ -34,6 +34,22 @@ app.whenReady().then(async () => {
     console.error('Database init failed:', err.message);
   }
 
+  // Migrate goals: ensure all have explicit agents arrays
+  try {
+    const { migrateGoalSources } = require('../src/orchestrator');
+    const allGoals = await db.getAllGoals();
+    for (const g of allGoals) {
+      const sources = g.goal_data?.context_sources;
+      if (!sources || !Array.isArray(sources.agents)) {
+        const migrated = migrateGoalSources(g.goal_data || {}, g.type);
+        await db.saveGoal({ ...g, goal_data: migrated });
+        console.log(`[Migration] Goal "${g.title}" → agents: [${migrated.context_sources.agents.join(', ')}]`);
+      }
+    }
+  } catch (err) {
+    console.error('Goal migration error:', err.message);
+  }
+
   createWindow();
   registerIPC();
 
@@ -180,40 +196,68 @@ Keep it scannable. Under 3 minutes to read. Reference specific past events and c
 
   ipcMain.handle('chat:start', async (_, options) => {
     const goals = await db.getActiveGoals();
-    if (goals.length === 0) return { error: 'No active goals' };
+    if (goals.length === 0) return { error: 'No active goals. Create a goal first.' };
 
-    const { buildSystemPrompt } = require('../src/orchestrator');
+    const { buildSystemPrompt, callClaude, checkUserContextFiles } = require('../src/orchestrator');
     chatSystemPrompt = await buildSystemPrompt(goals, options || {});
     chatHistory = [];
     chatSession = await db.createSession('advisory');
 
-    // Check for overdue/stalled actions for opening
+    // Gather context for opening
     const overdueActions = await db.getOverdueActions();
     const openActions = await db.getOpenActions();
     const highFollowUp = openActions.filter((a) => a.follow_up_count >= 2);
+    const recentSessions = await db.getRecentSessions(3);
+    const contextWarnings = checkUserContextFiles();
 
-    let opening = null;
+    // Build opening context
+    const openerParts = [];
+
     if (overdueActions.length > 0 || highFollowUp.length > 0) {
-      const { callClaude } = require('../src/orchestrator');
-      const items = [];
       for (const a of overdueActions) {
-        items.push(`OVERDUE: "${a.description}" was due ${a.due_date}. Follow-up count: ${a.follow_up_count}.`);
+        openerParts.push(`OVERDUE ACTION: "${a.description}" was due ${a.due_date}. Follow-up count: ${a.follow_up_count}.`);
       }
       for (const a of highFollowUp) {
         if (!overdueActions.find((o) => o.id === a.id)) {
-          items.push(`STALLED: "${a.description}" has been followed up ${a.follow_up_count} times.`);
+          openerParts.push(`STALLED ACTION: "${a.description}" has been followed up ${a.follow_up_count} times.`);
         }
       }
-      try {
-        opening = await callClaude(
-          `You are starting a new advisory session. These items need attention:\n\n${items.join('\n')}\n\nGenerate a brief, direct opening check-in. 2-4 sentences max.`,
-          chatSystemPrompt
-        );
-        chatHistory.push({ role: 'Atlas', content: opening });
-        for (const a of [...overdueActions, ...highFollowUp]) {
-          await db.updateAction(a.id, { follow_up_count: a.follow_up_count + 1 });
-        }
-      } catch {}
+    }
+
+    if (recentSessions.length > 0) {
+      const lastSession = recentSessions.find(s => s.summary);
+      if (lastSession) {
+        openerParts.push(`LAST SESSION (${lastSession.date}): ${lastSession.summary}`);
+      }
+    }
+
+    for (const g of goals) {
+      const days = g.created_at ? Math.floor((Date.now() - new Date(g.created_at).getTime()) / 86400000) : null;
+      openerParts.push(`ACTIVE GOAL: "${g.title}" (${g.type}, ${days !== null ? days + ' days active' : 'recently created'})`);
+    }
+
+    if (contextWarnings.length > 0) {
+      openerParts.push(`THIN CONTEXT: These user files still have placeholder content: ${contextWarnings.map(w => w.split(' — ')[0]).join(', ')}. Consider offering to fill them in.`);
+    }
+
+    const openerPrompt = `You are starting a new advisory session. Generate a specific, grounded opening. 2-4 sentences max. Reference what you actually know — overdue items, recent sessions, active goals, today's date. Feel like you've been thinking about the user between sessions. Never be generic. Never introduce yourself.
+
+Context for your opening:
+${openerParts.length > 0 ? openerParts.join('\n') : 'No specific items — but you have the user\'s goals and context in your system prompt. Reference something specific.'}
+
+Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}.`;
+
+    let opening = null;
+    try {
+      opening = await callClaude(openerPrompt, chatSystemPrompt);
+      chatHistory.push({ role: 'Atlas', content: opening });
+
+      // Increment follow-up counts for overdue/stalled
+      for (const a of [...overdueActions, ...highFollowUp]) {
+        await db.updateAction(a.id, { follow_up_count: a.follow_up_count + 1 });
+      }
+    } catch (err) {
+      console.error('[Chat] Opening generation failed:', err.message);
     }
 
     return { sessionId: chatSession.id, opening };
@@ -401,10 +445,10 @@ Keep it scannable. Under 3 minutes to read. Reference specific past events and c
   });
 
   ipcMain.handle('voice:transcribe', async (_, audioBuffer) => {
-    const { saveTempWav, transcribeLocal, cleanupTempFile } = require('../src/voice');
+    const { saveTempWav, transcribeFile, cleanupTempFile } = require('../src/voice');
     const tmpPath = saveTempWav(audioBuffer);
     try {
-      const text = await transcribeLocal(tmpPath);
+      const text = await transcribeFile(tmpPath);
       return { text };
     } catch (err) {
       return { error: err.message };
@@ -574,13 +618,57 @@ Be direct. Under 2 minutes to read. No fluff.`;
 
   ipcMain.handle('settings:getAgentSpecs', () => {
     const { loadAgentSpecs } = require('../src/orchestrator');
-    return loadAgentSpecs();
+    return loadAgentSpecs(); // returns [{ name, content }]
+  });
+
+  ipcMain.handle('settings:listAgentFiles', () => {
+    const { listAgentFiles } = require('../src/orchestrator');
+    return listAgentFiles().map(f => f.replace(/\.md$/, ''));
+  });
+
+  ipcMain.handle('settings:saveAgentSpec', (_, name, content) => {
+    const fs = require('fs');
+    const agentPath = path.join(__dirname, '..', 'config', 'agents', `${name}.md`);
+    fs.writeFileSync(agentPath, content, 'utf-8');
+  });
+
+  ipcMain.handle('settings:deleteAgentSpec', (_, name) => {
+    const fs = require('fs');
+    const agentPath = path.join(__dirname, '..', 'config', 'agents', `${name}.md`);
+    if (fs.existsSync(agentPath)) fs.unlinkSync(agentPath);
+  });
+
+  ipcMain.handle('settings:getAgentDefaults', () => {
+    const { AGENT_DEFAULTS_BY_TYPE } = require('../src/orchestrator');
+    return AGENT_DEFAULTS_BY_TYPE;
+  });
+
+  ipcMain.handle('settings:generatePerspective', async (_, name, domain) => {
+    const { generatePerspective } = require('../src/orchestrator');
+    return generatePerspective(name, domain);
+  });
+
+  ipcMain.handle('settings:perspectiveExists', (_, name) => {
+    const { perspectiveExists } = require('../src/orchestrator');
+    return perspectiveExists(name);
   });
 
   ipcMain.handle('settings:getMethodology', () => {
     const fs = require('fs');
     const methodPath = path.join(__dirname, '..', 'config', 'engine', 'methodology.md');
-    try { return fs.readFileSync(methodPath, 'utf-8'); } catch { return ''; }
+    try {
+      const content = fs.readFileSync(methodPath, 'utf-8');
+      const stats = fs.statSync(methodPath);
+      return {
+        content,
+        filePath: methodPath,
+        tokens: Math.ceil(content.length / 4),
+        lastModified: stats.mtime.toISOString(),
+        loaded: content.trim().length > 0,
+      };
+    } catch {
+      return { content: '', filePath: methodPath, tokens: 0, lastModified: null, loaded: false };
+    }
   });
 
   ipcMain.handle('settings:isGoogleConfigured', () => {
@@ -633,10 +721,17 @@ Rules:
         systemPrompt
       );
     } else {
-      opening = await callClaude(
-        `Start a new goal-definition conversation. Generate a warm, personable opening (2-3 sentences). Invite the user to describe what they're trying to achieve. Don't be generic or bureaucratic.`,
-        systemPrompt
-      );
+      // Check if Atlas knows the user — skip cold intro if so
+      const hasIdentity = userCtx.identity && !/\[.*to be filled.*\]/i.test(userCtx.identity);
+      const existingSessions = await db.getRecentSessions(30);
+      const existingGoals = await db.getActiveGoals();
+      const isReturning = hasIdentity || existingSessions.length > 0 || existingGoals.length > 0;
+
+      const createPrompt = isReturning
+        ? `The user wants to create a new goal. You already know them${cleanName ? ` (${cleanName})` : ''} and they have ${existingGoals.length} active goal(s). Generate a brief opening (2-3 sentences). Don't introduce yourself. Just get straight to it: ask what they're working toward.`
+        : `Start a new goal-definition conversation. This is a new user you haven't met yet. Generate a warm, personable opening (2-3 sentences). Briefly introduce yourself and invite them to describe what they're trying to achieve. Don't be bureaucratic.`;
+
+      opening = await callClaude(createPrompt, systemPrompt);
       interviewGoalId = await generateGoalId();
     }
 
@@ -647,18 +742,33 @@ Rules:
   ipcMain.handle('interview:send', async (_, message) => {
     const { callClaudeConversation } = require('../src/orchestrator');
 
+    const { AGENT_DEFAULTS_BY_TYPE } = require('../src/orchestrator');
     const systemPrompt = `You are Atlas conducting a goal-definition conversation. Be warm, direct, personable. Ask one or two questions at a time. Acknowledge what was shared. Infer what you can. Push back on vagueness warmly. Never use field names. Don't number questions.
 
 Required information to gather: outcome, metric, timeframe, baseline, why now, constraints, anti-goals.
 
-When the goal is sharp enough, present a natural-language summary and ask for confirmation. After the user confirms, your response MUST start with "GOAL_READY" on its own line, followed by your confirmation message.`;
+When the goal is sharp enough, present a natural-language summary and ask for confirmation. As part of your summary, mention which advisory perspectives you'll use — these are specialist thinking lenses that sharpen your advice. For example: "I'll sharpen my thinking with a few specialist perspectives — a job search strategist, a financial adviser, and a day planner. I'll always keep the meta-analyst for cross-goal awareness." If the user mentions something that suggests an additional perspective (like "I struggle with networking anxiety"), proactively suggest it: "I'll add a communication perspective for that."
+
+Available perspective defaults by goal type: ${JSON.stringify(AGENT_DEFAULTS_BY_TYPE)}. Meta-analyst is always included. You can suggest perspectives not in the defaults if the conversation warrants it — use a lowercase-hyphenated name.
+
+After the user confirms, your response MUST start with "GOAL_READY" on its own line, followed by your confirmation message. Include a line starting with "PERSPECTIVES:" followed by a comma-separated list of the agreed perspective names (lowercase-hyphenated slugs). Example: "PERSPECTIVES: job-search, financial, day-planner, learning, meta-analyst"`;
 
     interviewHistory.push({ role: 'User', content: message });
     const response = await callClaudeConversation(message, systemPrompt, interviewHistory.slice(0, -1));
     interviewHistory.push({ role: 'Atlas', content: response });
 
     const isReady = response.trim().startsWith('GOAL_READY');
-    return { response: response.replace(/^GOAL_READY\n?/, ''), isReady };
+    let cleanResponse = response.replace(/^GOAL_READY\n?/, '');
+
+    // Extract perspectives if present
+    let suggestedPerspectives = null;
+    const perspMatch = cleanResponse.match(/^PERSPECTIVES:\s*(.+)$/m);
+    if (perspMatch) {
+      suggestedPerspectives = perspMatch[1].split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+      cleanResponse = cleanResponse.replace(/^PERSPECTIVES:.*$/m, '').trim();
+    }
+
+    return { response: cleanResponse, isReady, suggestedPerspectives };
   });
 
   ipcMain.handle('interview:complete', async () => {
@@ -691,9 +801,29 @@ Return ONLY valid JSON. No explanation.`;
     if (!match) throw new Error('Failed to structure goal from conversation');
 
     const goalData = JSON.parse(match[0]);
-    // Add default context sources if not present
+    // Assign perspectives based on goal type, create missing perspective files
     if (!goalData.context_sources) {
-      goalData.context_sources = { ...DEFAULT_CONTEXT_SOURCES };
+      const { AGENT_DEFAULTS_BY_TYPE, perspectiveExists, generatePerspective } = require('../src/orchestrator');
+      const typeAgents = AGENT_DEFAULTS_BY_TYPE[goalData.type] || ['day-planner'];
+      const perspectives = [...new Set([...typeAgents, 'meta-analyst'])];
+
+      // Create any missing perspective files
+      for (const p of perspectives) {
+        if (!perspectiveExists(p)) {
+          const domain = p.replace(/-/g, ' ');
+          try {
+            await generatePerspective(p, domain);
+            console.log(`[Interview] Created perspective: ${p}`);
+          } catch (err) {
+            console.error(`[Interview] Failed to create perspective ${p}:`, err.message);
+          }
+        }
+      }
+
+      goalData.context_sources = {
+        ...DEFAULT_CONTEXT_SOURCES,
+        agents: perspectives,
+      };
     }
     const id = interviewGoalId || await generateGoalId();
 
@@ -706,7 +836,7 @@ Return ONLY valid JSON. No explanation.`;
       status: 'active',
     });
     await db.updateGoalStatus(id, 'active');
-    console.log('[Interview] Goal saved:', id, goalData.title);
+    console.log('[Interview] Goal saved:', id, goalData.title, '| perspectives:', goalData.context_sources.agents.join(', '));
 
     interviewHistory = [];
     interviewMode = null;

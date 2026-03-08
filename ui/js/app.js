@@ -7,7 +7,7 @@ let cachedCalendarData = null;
 let lastChatRole = null;
 let streamingMessageEl = null;
 let streamingContent = '';
-let voiceRecognition = null;
+// Voice state managed in initVoice()
 let isRecording = false;
 
 // === Toast System ===
@@ -80,6 +80,38 @@ document.querySelectorAll('.nav-item').forEach((item) => {
   item.addEventListener('click', () => navigateTo(item.dataset.screen));
 });
 
+// === Sidebar Sources Toggle ===
+
+document.getElementById('sources-toggle').addEventListener('click', () => {
+  const items = document.getElementById('sources-items');
+  const arrow = document.getElementById('sources-arrow');
+  items.classList.toggle('collapsed');
+  arrow.classList.toggle('collapsed');
+});
+
+async function updateSourceStatuses() {
+  try {
+    const goals = await atlas.goals.getActive();
+    const files = await atlas.files.list();
+
+    // Email status
+    const emailEl = document.getElementById('source-status-email');
+    const emailGoals = goals.filter(g => g.goal_data?.context_sources?.gmail === 'included');
+    if (emailGoals.length > 0) {
+      emailEl.textContent = `${emailGoals.length} goal${emailGoals.length > 1 ? 's' : ''}`;
+      emailEl.className = 'nav-source-status active';
+    } else {
+      emailEl.textContent = 'inactive';
+      emailEl.className = 'nav-source-status';
+    }
+
+    // Files status
+    const filesEl = document.getElementById('source-status-files');
+    filesEl.textContent = files.length > 0 ? `${files.length} file${files.length !== 1 ? 's' : ''}` : 'empty';
+    filesEl.className = files.length > 0 ? 'nav-source-status active' : 'nav-source-status';
+  } catch {}
+}
+
 // === Tab Navigation ===
 
 document.querySelectorAll('.tabs').forEach((tabBar) => {
@@ -140,6 +172,27 @@ async function loadToday() {
 
   renderCalendarPanel();
   renderContextSummary();
+  updateSourceStatuses();
+  updateReflectionButton();
+}
+
+async function updateReflectionButton() {
+  const btn = document.getElementById('btn-generate-reflection');
+  const hour = new Date().getHours();
+  const todaySessions = await atlas.sessions.getRecent(1);
+  const hasSessions = todaySessions.length > 0;
+
+  if (!hasSessions) {
+    btn.style.display = 'none';
+  } else if (hour >= 17) {
+    btn.style.display = '';
+    btn.className = 'btn btn-primary';
+    btn.textContent = 'End-of-Day Reflection';
+  } else {
+    btn.style.display = '';
+    btn.className = 'btn btn-sm';
+    btn.textContent = 'Reflect on today';
+  }
 }
 
 function renderCalendarPanel() {
@@ -277,18 +330,21 @@ async function sendChatMessage() {
 
   appendChatMessage('chat-messages', 'user', message);
 
-  // Set up streaming listeners before sending
+  // Reset streaming state
   streamingContent = '';
   streamingMessageEl = null;
+  let streamCreated = false;
 
   atlas.chat.removeStreamListeners();
 
   atlas.chat.onStreamChunk((chunk) => {
     streamingContent += chunk;
     if (!streamingMessageEl) {
-      // Create the message element on first chunk
+      // Remove typing indicator on first chunk
+      removeTypingIndicator(thinkingEl);
       streamingMessageEl = appendChatMessage('chat-messages', 'atlas', '');
       streamingMessageEl.classList.add('streaming');
+      streamCreated = true;
     }
     const contentEl = streamingMessageEl.querySelector('.msg-content');
     if (contentEl) {
@@ -308,27 +364,18 @@ async function sendChatMessage() {
       }
       streamingMessageEl.classList.remove('streaming');
     }
-    streamingMessageEl = null;
-    streamingContent = '';
-    input.disabled = false;
-    document.getElementById('btn-chat-send').disabled = false;
-    input.focus();
   });
 
   atlas.chat.onStreamError((err) => {
+    removeTypingIndicator(thinkingEl);
     if (streamingMessageEl) {
-      removeTypingIndicator(streamingMessageEl);
+      streamingMessageEl.remove();
       streamingMessageEl = null;
     }
     appendChatMessage('chat-messages', 'system', `Error: ${err}`);
-    streamingContent = '';
-    input.disabled = false;
-    document.getElementById('btn-chat-send').disabled = false;
-    input.focus();
   });
 
   atlas.chat.onStreamReplace((fullText) => {
-    // Marker follow-up replaced the streaming content
     if (streamingMessageEl) {
       const contentEl = streamingMessageEl.querySelector('.msg-content');
       if (contentEl) {
@@ -344,7 +391,7 @@ async function sendChatMessage() {
   try {
     const result = await atlas.chat.sendStreaming(message);
 
-    // Remove typing indicator (streaming content replaced it)
+    // Remove typing indicator if streaming never started
     removeTypingIndicator(thinkingEl);
 
     // Show markers if any
@@ -354,15 +401,14 @@ async function sendChatMessage() {
       }
     }
 
-    // If streaming didn't create a message (e.g. error path), show buffered
-    if (!streamingMessageEl && result && result.response) {
+    // Only show buffered response if streaming never created a message
+    if (!streamCreated && result && result.response) {
       appendChatMessage('chat-messages', 'atlas', result.response);
     }
   } catch (err) {
     removeTypingIndicator(thinkingEl);
     if (streamingMessageEl) {
       streamingMessageEl.remove();
-      streamingMessageEl = null;
     }
     appendChatMessage('chat-messages', 'system', `Error: ${err.message}`);
   }
@@ -431,10 +477,20 @@ async function loadGoals() {
     return;
   }
 
+  let allAgents = [];
+  try { allAgents = await atlas.settings.listAgentFiles(); } catch {}
+
   container.innerHTML = goals.map((g) => {
     const data = g.goal_data || {};
     const statusTag = g.status === 'active' ? 'tag-success' : g.status === 'paused' ? 'tag-warning' : 'tag-secondary';
     const priorityTag = g.priority === 'primary' ? 'tag-primary' : g.priority === 'secondary' ? 'tag-warning' : 'tag-secondary';
+    const goalAgents = (data.context_sources && Array.isArray(data.context_sources.agents))
+      ? data.context_sources.agents : [];
+
+    const agentBadges = allAgents.map((a) => {
+      const active = goalAgents.includes(a);
+      return `<span class="tag ${active ? 'tag-primary' : 'tag-secondary'}" style="cursor:pointer;font-size:11px;margin:2px" onclick="toggleGoalAgent('${g.id}', '${a}', ${active})" title="${active ? 'Click to remove perspective' : 'Click to add perspective'}">${a}${active ? '' : ' +'}</span>`;
+    }).join('');
 
     return `<div class="card">
       <div class="card-header">
@@ -450,13 +506,15 @@ async function loadGoals() {
         ${data.target_date ? `<div><strong>Target:</strong> ${data.target_date}</div>` : ''}
         ${data.baseline ? `<div><strong>Baseline:</strong> ${escapeHtml(data.baseline)}</div>` : ''}
         ${data.next_milestone ? `<div><strong>Next milestone:</strong> ${escapeHtml(data.next_milestone)}</div>` : ''}
+        <div style="margin-top:8px"><strong>Perspectives:</strong></div>
+        <div style="margin-top:4px">${agentBadges}</div>
       </div>
       <div style="margin-top:10px" class="btn-group">
-        <button class="btn btn-sm" onclick="startGoalEdit('${g.id}')">Edit</button>
-        ${g.status === 'active' ? `<button class="btn btn-sm" onclick="updateGoalStatus('${g.id}', 'paused')">Pause</button>` : ''}
-        ${g.status === 'paused' ? `<button class="btn btn-sm" onclick="updateGoalStatus('${g.id}', 'active')">Resume</button>` : ''}
-        ${g.status === 'completed' ? `<button class="btn btn-sm" onclick="updateGoalStatus('${g.id}', 'active')">Reactivate</button>` : ''}
-        ${g.status !== 'completed' ? `<button class="btn btn-sm btn-primary" onclick="updateGoalStatus('${g.id}', 'completed')">Complete</button>` : ''}
+        <button class="btn btn-sm" onclick="startGoalEdit('${g.id}')" title="Update any details of this goal">Edit</button>
+        ${g.status === 'active' ? `<button class="btn btn-sm" onclick="updateGoalStatus('${g.id}', 'paused')" title="Temporarily remove from active focus. Atlas won't include it in briefs.">Pause</button>` : ''}
+        ${g.status === 'paused' ? `<button class="btn btn-sm" onclick="updateGoalStatus('${g.id}', 'active')" title="Bring this goal back into active focus.">Resume</button>` : ''}
+        ${g.status === 'completed' ? `<button class="btn btn-sm" onclick="updateGoalStatus('${g.id}', 'active')" title="Bring this goal back into active focus.">Reactivate</button>` : ''}
+        ${g.status !== 'completed' ? `<button class="btn btn-sm btn-primary" onclick="confirmAchieved('${g.id}')" title="Goal accomplished. Atlas archives it but you can reopen it.">Mark Achieved</button>` : ''}
       </div>
     </div>`;
   }).join('');
@@ -466,6 +524,30 @@ async function updateGoalStatus(id, status) {
   await atlas.goals.updateStatus(id, status);
   loadGoals();
   loadToday();
+}
+
+function confirmAchieved(goalId) {
+  if (confirm("Mark this goal as achieved? It'll move out of active focus and won't appear in briefs or sessions. You can reactivate it anytime.")) {
+    updateGoalStatus(goalId, 'completed');
+  }
+}
+
+async function toggleGoalAgent(goalId, agentName, currentlyActive) {
+  const goal = await atlas.goals.get(goalId);
+  if (!goal) return;
+  const data = goal.goal_data || {};
+  const sources = data.context_sources || {};
+  let agents = Array.isArray(sources.agents) ? [...sources.agents] : [];
+
+  if (currentlyActive) {
+    if (agentName === 'meta-analyst') { showToast('Meta-analyst perspective cannot be removed', 'error'); return; }
+    agents = agents.filter(a => a !== agentName);
+  } else {
+    if (!agents.includes(agentName)) agents.push(agentName);
+  }
+
+  await atlas.goals.updateSources(goalId, { ...sources, agents });
+  loadGoals();
 }
 
 // --- Conversational Goal Interview ---
@@ -658,7 +740,7 @@ async function loadActions() {
   const today = new Date().toISOString().split('T')[0];
 
   if (actions.length === 0) {
-    container.innerHTML = '<div class="empty-state"><p>No actions to show.</p></div>';
+    container.innerHTML = '<div class="empty-state"><p>No actions yet. They\'ll appear here after your advisory sessions when you commit to specific next steps.</p></div>';
     return;
   }
 
@@ -724,9 +806,9 @@ async function loadMemoryContext() {
   const container = document.getElementById('memory-context');
 
   const files = [
-    { name: 'IDENTITY.md', label: 'Identity', content: ctx.identity, desc: 'Your stable identity — name, background, communication style.', prompt: 'Tell me about yourself — your background, where you\'re based, what you do.' },
-    { name: 'SITUATION.md', label: 'Situation', content: ctx.situation, desc: 'Your current situation — employment, finances, living.', prompt: 'What\'s your current situation? Employment, finances, anything I should know.' },
-    { name: 'PREFERENCES.md', label: 'Preferences', content: ctx.preferences, desc: 'Your advisory preferences — directness, working style.', prompt: 'How do you want me to work with you? How direct should I be?' },
+    { name: 'IDENTITY.md', label: 'Identity', content: ctx.identity, desc: 'Tell Atlas who you are so it can personalise advice. Example: your name, where you live, your professional background, and how you prefer to communicate (direct, detailed, casual).', prompt: 'Tell me about yourself — your background, where you\'re based, what you do.' },
+    { name: 'SITUATION.md', label: 'Situation', content: ctx.situation, desc: 'Describe your current reality so Atlas understands your constraints. Example: employment status, approximate financial runway, living situation, and any major life factors affecting your goals.', prompt: 'What\'s your current situation? Employment, finances, anything I should know.' },
+    { name: 'PREFERENCES.md', label: 'Preferences', content: ctx.preferences, desc: 'Tell Atlas how to work with you. Example: how blunt it should be, your typical working hours, any time blocks it should respect, and how detailed you want morning briefs.', prompt: 'How do you want me to work with you? How direct should I be?' },
   ];
 
   container.innerHTML = `
@@ -745,13 +827,14 @@ async function loadMemoryContext() {
             <button class="btn btn-sm" style="margin-left:8px" onclick="startContextInterview('${f.name}', '${escapeHtml(f.prompt)}')">Talk to Atlas about this</button>
           </div>
         </div>
-        <p style="font-size:12px;color:var(--text-secondary);margin-bottom:8px">${f.desc}</p>
+        <p style="font-size:13px;color:var(--text-secondary);margin-bottom:8px">${f.desc}</p>
         <textarea class="form-textarea" id="ctx-${f.name}" rows="8">${escapeHtml(f.content)}</textarea>
         <div style="margin-top:8px">
           <button class="btn btn-sm btn-primary" onclick="saveContext('${f.name}')">Save</button>
         </div>
       </div>
     `).join('')}
+    <p style="color:var(--text-muted);font-size:13px;margin-top:8px">Don't overthink these — just write naturally. Atlas uses this as background context, and you can update them anytime through the editor or by talking to Atlas.</p>
   `;
 }
 
@@ -1187,37 +1270,150 @@ async function loadSettings() {
 async function loadSettingsAgents() {
   const container = document.getElementById('settings-agents');
   const specs = await atlas.settings.getAgentSpecs();
-  if (specs.length === 0) {
-    container.innerHTML = '<div class="empty-state"><p>No agent specs found.</p></div>';
-    return;
+  const goals = await atlas.goals.getAll();
+
+  // Build goal-to-agent mapping
+  const agentGoalMap = {};
+  for (const g of goals) {
+    const agents = g.goal_data?.context_sources?.agents;
+    if (Array.isArray(agents)) {
+      for (const a of agents) {
+        if (!agentGoalMap[a]) agentGoalMap[a] = [];
+        agentGoalMap[a].push(g.title);
+      }
+    }
   }
-  container.innerHTML = specs.map((spec, i) => {
-    const title = spec.split('\n')[0].replace(/^#\s*/, '').trim() || `Perspective ${i + 1}`;
+
+  const specCards = specs.map((spec) => {
+    const title = spec.content.split('\n')[0].replace(/^#\s*/, '').trim() || spec.name;
+    const isMeta = spec.name === 'meta-analyst';
+    const usedBy = agentGoalMap[spec.name] || [];
+    const goalBadges = usedBy.length > 0
+      ? usedBy.map(t => `<span class="tag tag-primary" style="font-size:11px">${escapeHtml(t)}</span>`).join(' ')
+      : '<span style="color:var(--text-secondary);font-size:12px">No goals</span>';
+
     return `<div class="card">
-      <div class="card-title" style="margin-bottom:8px">${escapeHtml(title)}</div>
-      <div class="card-body md-content">${renderMarkdown(spec)}</div>
+      <div class="card-header">
+        <span class="card-title">${escapeHtml(title)}</span>
+        <div class="btn-group">
+          <button class="btn btn-sm" onclick="editAgentSpec('${spec.name}')">Edit</button>
+          ${isMeta ? '' : `<button class="btn btn-sm btn-danger" onclick="deleteAgentSpec('${spec.name}')">Delete</button>`}
+        </div>
+      </div>
+      <div style="margin-bottom:8px;font-size:12px"><strong>Used by:</strong> ${goalBadges}</div>
+      <div class="card-body md-content">${renderMarkdown(spec.content)}</div>
     </div>`;
   }).join('');
+
+  container.innerHTML = `
+    <div style="margin-bottom:16px;padding:12px 16px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:13px;color:var(--text-secondary);line-height:1.5">
+      These are the advisory perspectives Atlas uses to sharpen its thinking for your goals. They're managed automatically during goal creation — you only need to edit them if you want to fine-tune how Atlas thinks.
+    </div>
+    <div style="margin-bottom:12px">
+      <button class="btn" onclick="createAgentSpec()">New Perspective</button>
+    </div>
+    ${specCards || '<div class="empty-state"><p>No perspectives yet. Create a goal and Atlas will set these up automatically.</p></div>'}
+  `;
+}
+
+async function editAgentSpec(name) {
+  const specs = await atlas.settings.getAgentSpecs();
+  const spec = specs.find(s => s.name === name);
+  if (!spec) return;
+
+  const content = prompt('Edit perspective spec (Markdown):', spec.content);
+  if (content === null) return;
+
+  await atlas.settings.saveAgentSpec(name, content);
+  showToast(`Perspective "${name}" updated`, 'success');
+  loadSettingsAgents();
+}
+
+async function createAgentSpec() {
+  const name = prompt('Perspective name (lowercase, hyphens, e.g. "negotiation"):');
+  if (!name || !/^[a-z0-9-]+$/.test(name)) {
+    if (name !== null) showToast('Invalid name. Use lowercase letters, numbers, hyphens only.', 'error');
+    return;
+  }
+
+  const existing = await atlas.settings.listAgentFiles();
+  if (existing.includes(name)) {
+    showToast(`Perspective "${name}" already exists`, 'error');
+    return;
+  }
+
+  const template = `# ${name.split('-').map(w => w[0].toUpperCase() + w.slice(1)).join(' ')}
+
+## Role
+[Describe the advisory perspective]
+
+## Focus Areas
+- [Area 1]
+- [Area 2]
+
+## Output Format
+Concise bullet points. Lead with the most actionable item.`;
+
+  const content = prompt('Edit the perspective spec:', template);
+  if (content === null) return;
+
+  await atlas.settings.saveAgentSpec(name, content);
+  showToast(`Perspective "${name}" created`, 'success');
+  loadSettingsAgents();
+}
+
+async function deleteAgentSpec(name) {
+  if (!confirm(`Delete perspective "${name}"? This will also remove it from any goals.`)) return;
+
+  await atlas.settings.deleteAgentSpec(name);
+
+  // Remove from all goals that reference it
+  const goals = await atlas.goals.getAll();
+  for (const g of goals) {
+    const agents = g.goal_data?.context_sources?.agents;
+    if (Array.isArray(agents) && agents.includes(name)) {
+      const updated = agents.filter(a => a !== name);
+      await atlas.goals.updateSources(g.id, { ...g.goal_data.context_sources, agents: updated });
+    }
+  }
+
+  showToast(`Perspective "${name}" deleted`, 'success');
+  loadSettingsAgents();
 }
 
 async function loadSettingsMethodology() {
   const container = document.getElementById('settings-methodology');
   const methodology = await atlas.settings.getMethodology();
-  if (!methodology) {
-    container.innerHTML = '<div class="empty-state"><p>No methodology file found.</p></div>';
+
+  if (!methodology || !methodology.loaded) {
+    container.innerHTML = '<div class="empty-state"><p>No methodology file found at config/engine/methodology.md</p></div>';
     return;
   }
   container.innerHTML = `
+    <div class="card" style="margin-bottom:12px">
+      <div class="card-header">
+        <span class="card-title">Methodology Diagnostic</span>
+        <span class="tag ${methodology.loaded ? 'tag-success' : 'tag-warning'}">${methodology.loaded ? 'Loaded' : 'Empty'}</span>
+      </div>
+      <div class="card-body">
+        <div><strong>File:</strong> <code style="font-size:11px">${escapeHtml(methodology.filePath)}</code></div>
+        <div><strong>Tokens:</strong> ~${methodology.tokens}</div>
+        ${methodology.lastModified ? `<div><strong>Last modified:</strong> ${new Date(methodology.lastModified).toLocaleString()}</div>` : ''}
+      </div>
+    </div>
     <div class="card">
-      <div class="card-title" style="margin-bottom:12px">Advisory Methodology</div>
-      <div class="card-body md-content" style="max-height:600px;overflow-y:auto">${renderMarkdown(methodology)}</div>
+      <div class="card-title" style="margin-bottom:12px">Content Preview</div>
+      <div class="card-body md-content" style="max-height:600px;overflow-y:auto">${renderMarkdown(methodology.content)}</div>
     </div>
   `;
 }
 
 async function loadSettingsDiagnostics() {
   const container = document.getElementById('settings-diagnostics');
-  const diag = await atlas.settings.getDiagnostics();
+  const [diag, methodology] = await Promise.all([
+    atlas.settings.getDiagnostics(),
+    atlas.settings.getMethodology(),
+  ]);
   if (!diag) {
     container.innerHTML = '<div class="empty-state"><p>No diagnostics yet. Generate a brief or start a chat session first.</p></div>';
     return;
@@ -1257,6 +1453,18 @@ async function loadSettingsDiagnostics() {
           <h3 style="font-size:14px;margin:12px 0 8px">Dropped Sections</h3>
           ${diag.trimmedSections.map((s) => `<div class="tag tag-danger" style="margin-right:4px">${escapeHtml(s)}</div>`).join('')}
         ` : ''}
+        <h3 style="font-size:14px;margin:12px 0 8px">Perspectives</h3>
+        <div style="margin-bottom:4px;font-size:12px;color:var(--text-secondary)">
+          ${(diag.loadedAgents || []).length} loaded of ${(diag.availableAgents || []).length} available
+        </div>
+        ${(diag.availableAgents || []).map(a => {
+          const loaded = (diag.loadedAgents || []).includes(a);
+          return `<span class="tag ${loaded ? 'tag-primary' : 'tag-secondary'}" style="margin:2px">${escapeHtml(a)}</span>`;
+        }).join('') || '<span style="color:var(--text-secondary)">None</span>'}
+        <h3 style="font-size:14px;margin:12px 0 8px">Methodology</h3>
+        ${methodology && methodology.loaded
+          ? `<div style="font-size:13px"><span class="tag tag-success">Loaded</span> ~${methodology.tokens} tokens <span style="color:var(--text-secondary)">${escapeHtml(methodology.filePath || '')}</span></div>`
+          : '<div style="font-size:13px"><span class="tag tag-warning">Not loaded</span> No methodology file found</div>'}
       </div>
     </div>
   `;
@@ -1272,6 +1480,13 @@ function escapeHtml(text) {
 }
 
 function closeModal(id) {
+  // Guard context interview close if proposed changes exist
+  if (id === 'modal-context-interview') {
+    const proposed = document.getElementById('context-interview-proposed');
+    if (proposed && proposed.style.display !== 'none') {
+      if (!confirm('You have unsaved changes. Close without saving?')) return;
+    }
+  }
   document.getElementById(id).classList.remove('active');
 }
 
@@ -1361,7 +1576,7 @@ async function renderContextSummary() {
     }
   }
 
-  badges.innerHTML = sources.map((s) => {
+  let badgesHtml = sources.map((s) => {
     const active = sourceStatus[s.key];
     const unavailable = (s.key === 'gmail' || s.key === 'calendar') && !googleConfigured;
     const cls = unavailable ? 'inactive' : active ? 'active' : 'inactive';
@@ -1369,6 +1584,15 @@ async function renderContextSummary() {
     return `<div class="context-badge ${cls}"><span class="badge-dot"></span>${s.icon} ${label}</div>`;
   }).join('');
 
+  // Perspectives
+  if (diag && diag.loadedAgents) {
+    const perspectiveBadges = diag.loadedAgents.map(a =>
+      `<div class="context-badge active"><span class="badge-dot"></span>${a}</div>`
+    ).join('');
+    badgesHtml += `<div style="width:100%;margin-top:8px;font-size:12px;color:var(--text-secondary)">Perspectives:</div>${perspectiveBadges}`;
+  }
+
+  badges.innerHTML = badgesHtml;
   panel.style.display = 'flex';
   panel.style.flexDirection = 'column';
 }
@@ -1420,97 +1644,125 @@ async function switchEngine(name) {
 
 // === Voice Input (Push-to-Talk) ===
 
-function initVoice() {
-  // Use Web Speech API (built into Chromium)
-  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SpeechRecognition) {
-    console.log('[Voice] Web Speech API not available');
-    // Hide mic buttons
+let whisperAvailable = false;
+let mediaRecorder = null;
+let audioChunks = [];
+
+async function initVoice() {
+  // Check if local Whisper is available
+  try {
+    whisperAvailable = await atlas.voice.isAvailable();
+  } catch { whisperAvailable = false; }
+
+  if (!whisperAvailable) {
+    console.log('[Voice] Local Whisper not available — hiding mic buttons');
     document.querySelectorAll('.btn-mic').forEach((btn) => { btn.style.display = 'none'; });
     return;
   }
 
-  voiceRecognition = new SpeechRecognition();
-  voiceRecognition.continuous = false;
-  voiceRecognition.interimResults = true;
-  voiceRecognition.lang = 'en-GB';
+  console.log('[Voice] Local Whisper available — wiring mic buttons');
 
-  // Wire mic buttons
-  document.getElementById('btn-chat-mic').addEventListener('mousedown', () => startVoice('chat-input'));
-  document.getElementById('btn-chat-mic').addEventListener('mouseup', stopVoice);
-  document.getElementById('btn-chat-mic').addEventListener('mouseleave', stopVoice);
-
-  document.getElementById('btn-goal-mic').addEventListener('mousedown', () => startVoice('goal-interview-input'));
-  document.getElementById('btn-goal-mic').addEventListener('mouseup', stopVoice);
-  document.getElementById('btn-goal-mic').addEventListener('mouseleave', stopVoice);
-
-  // Touch support for mobile/tablet
-  document.getElementById('btn-chat-mic').addEventListener('touchstart', (e) => { e.preventDefault(); startVoice('chat-input'); });
-  document.getElementById('btn-chat-mic').addEventListener('touchend', (e) => { e.preventDefault(); stopVoice(); });
-
-  document.getElementById('btn-goal-mic').addEventListener('touchstart', (e) => { e.preventDefault(); startVoice('goal-interview-input'); });
-  document.getElementById('btn-goal-mic').addEventListener('touchend', (e) => { e.preventDefault(); stopVoice(); });
+  // Wire all mic buttons generically
+  const micWiring = [
+    ['btn-chat-mic', 'chat-input'],
+    ['btn-goal-mic', 'goal-interview-input'],
+    ['btn-context-mic', 'context-interview-input'],
+  ];
+  for (const [btnId, inputId] of micWiring) {
+    const btn = document.getElementById(btnId);
+    if (!btn) continue;
+    btn.addEventListener('mousedown', () => startVoice(inputId));
+    btn.addEventListener('mouseup', stopVoice);
+    btn.addEventListener('mouseleave', stopVoice);
+    btn.addEventListener('touchstart', (e) => { e.preventDefault(); startVoice(inputId); });
+    btn.addEventListener('touchend', (e) => { e.preventDefault(); stopVoice(); });
+  }
 }
 
 let voiceTargetInput = null;
-let voiceInterimText = '';
 
-function startVoice(inputId) {
-  if (!voiceRecognition || isRecording) return;
+// Map input IDs to their mic button IDs
+const micButtonMap = {
+  'chat-input': 'btn-chat-mic',
+  'goal-interview-input': 'btn-goal-mic',
+  'context-interview-input': 'btn-context-mic',
+};
+
+let voiceDotInterval = null;
+
+function startVoiceDots(input, label, cssClass) {
+  stopVoiceDots();
+  input.classList.add(cssClass);
+  let dots = 0;
+  input.placeholder = label;
+  voiceDotInterval = setInterval(() => {
+    dots = (dots + 1) % 4;
+    input.placeholder = label + '.'.repeat(dots);
+  }, 400);
+}
+
+function stopVoiceDots() {
+  if (voiceDotInterval) { clearInterval(voiceDotInterval); voiceDotInterval = null; }
+  document.querySelectorAll('.chat-input').forEach(el => {
+    el.classList.remove('voice-listening', 'voice-transcribing');
+  });
+}
+
+async function startVoice(inputId) {
+  if (isRecording) return;
   voiceTargetInput = document.getElementById(inputId);
   if (!voiceTargetInput) return;
 
+  // Show recording state immediately
   isRecording = true;
-  voiceInterimText = '';
-
-  // Highlight the active mic button
-  document.querySelectorAll('.btn-mic').forEach((btn) => {
-    if (btn.closest('.chat-input-bar')?.contains(voiceTargetInput)) {
-      btn.classList.add('recording');
-    }
-  });
-
-  voiceRecognition.onresult = (event) => {
-    let interim = '';
-    let final = '';
-    for (let i = event.resultIndex; i < event.results.length; i++) {
-      const transcript = event.results[i][0].transcript;
-      if (event.results[i].isFinal) {
-        final += transcript;
-      } else {
-        interim += transcript;
-      }
-    }
-
-    // Append final text to input, show interim as placeholder
-    if (final) {
-      const existing = voiceTargetInput.value;
-      voiceTargetInput.value = existing + (existing ? ' ' : '') + final.trim();
-      voiceInterimText = '';
-    }
-    if (interim) {
-      voiceInterimText = interim;
-      voiceTargetInput.placeholder = interim + '...';
-    }
-  };
-
-  voiceRecognition.onerror = (event) => {
-    if (event.error === 'not-allowed') {
-      showToast('Microphone access denied. Check browser permissions.', 'error');
-    } else if (event.error !== 'aborted' && event.error !== 'no-speech') {
-      showToast(`Voice error: ${event.error}`, 'warning');
-    }
-    stopVoice();
-  };
-
-  voiceRecognition.onend = () => {
-    stopVoice();
-  };
+  const micBtn = document.getElementById(micButtonMap[inputId]);
+  if (micBtn) micBtn.classList.add('recording');
+  startVoiceDots(voiceTargetInput, 'Listening', 'voice-listening');
 
   try {
-    voiceRecognition.start();
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+    audioChunks = [];
+
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) audioChunks.push(e.data);
+    };
+
+    // Capture references before async gap
+    const targetInput = voiceTargetInput;
+
+    mediaRecorder.onstop = async () => {
+      stream.getTracks().forEach(t => t.stop());
+      if (audioChunks.length === 0 || !targetInput) { stopVoiceDots(); return; }
+
+      startVoiceDots(targetInput, 'Transcribing', 'voice-transcribing');
+      try {
+        const blob = new Blob(audioChunks, { type: 'audio/webm' });
+        const arrayBuffer = await blob.arrayBuffer();
+        const wavBuffer = await convertToWav(arrayBuffer);
+        const result = await atlas.voice.transcribe(wavBuffer);
+        if (result.text) {
+          const existing = targetInput.value;
+          targetInput.value = existing + (existing ? ' ' : '') + result.text.trim();
+        } else if (result.error) {
+          showToast(`Transcription error: ${result.error}`, 'error');
+        }
+      } catch (err) {
+        showToast(`Voice error: ${err.message}`, 'error');
+      }
+      stopVoiceDots();
+      targetInput.placeholder = targetInput.id === 'chat-input' ? 'Type your message...' : 'Describe your goal...';
+    };
+
+    // If user already released before getUserMedia resolved, stop immediately
+    if (!isRecording) {
+      stream.getTracks().forEach(t => t.stop());
+      return;
+    }
+
+    mediaRecorder.start();
   } catch (err) {
-    showToast('Could not start voice input', 'error');
+    showToast('Microphone access denied or unavailable', 'error');
     stopVoice();
   }
 }
@@ -1520,17 +1772,54 @@ function stopVoice() {
   isRecording = false;
 
   document.querySelectorAll('.btn-mic').forEach((btn) => btn.classList.remove('recording'));
+  // Don't stopVoiceDots here — let onstop handle the transition to "Transcribing"
 
-  if (voiceTargetInput) {
-    voiceTargetInput.placeholder = voiceTargetInput.id === 'chat-input' ? 'Type your message...' : 'Describe your goal...';
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stop();
+  }
+}
+
+// Convert webm/opus audio to 16kHz mono WAV for Whisper
+async function convertToWav(webmBuffer) {
+  const audioCtx = new OfflineAudioContext(1, 16000 * 30, 16000); // 30 sec max
+  const audioBuffer = await audioCtx.decodeAudioData(webmBuffer);
+
+  // Resample to 16kHz mono
+  const offlineCtx = new OfflineAudioContext(1, Math.ceil(audioBuffer.duration * 16000), 16000);
+  const source = offlineCtx.createBufferSource();
+  source.buffer = audioBuffer;
+  source.connect(offlineCtx.destination);
+  source.start();
+  const rendered = await offlineCtx.startRendering();
+  const pcm = rendered.getChannelData(0);
+
+  // Build WAV file
+  const wavBuffer = new ArrayBuffer(44 + pcm.length * 2);
+  const view = new DataView(wavBuffer);
+
+  // WAV header
+  const writeString = (offset, str) => { for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i)); };
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + pcm.length * 2, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, 1, true); // mono
+  view.setUint32(24, 16000, true); // sample rate
+  view.setUint32(28, 32000, true); // byte rate
+  view.setUint16(32, 2, true); // block align
+  view.setUint16(34, 16, true); // bits per sample
+  writeString(36, 'data');
+  view.setUint32(40, pcm.length * 2, true);
+
+  // Convert float32 to int16
+  for (let i = 0; i < pcm.length; i++) {
+    const s = Math.max(-1, Math.min(1, pcm[i]));
+    view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
   }
 
-  try {
-    if (voiceRecognition) voiceRecognition.stop();
-  } catch {}
-
-  voiceTargetInput = null;
-  voiceInterimText = '';
+  return wavBuffer;
 }
 
 // === Init ===

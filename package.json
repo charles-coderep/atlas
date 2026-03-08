@@ -19,7 +19,8 @@
     "dotenv": "^17.3.1",
     "googleapis": "^171.4.0",
     "papaparse": "^5.5.3",
-    "pdf-parse": "^2.4.5"
+    "pdf-parse": "^2.4.5",
+    "whisper-cpp-node": "^0.2.12"
   },
   "devDependencies": {
     "electron": "^40.8.0"

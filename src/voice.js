@@ -1,55 +1,60 @@
-const { execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
 const MODEL_PATH = path.join(__dirname, '..', 'config', 'models', 'ggml-small.en.bin');
 
-// Look for whisper binary in common locations
-function findWhisperBinary() {
-  const candidates = [
-    path.join(__dirname, '..', 'config', 'models', 'whisper-cli.exe'),
-    path.join(__dirname, '..', 'config', 'models', 'main.exe'),
-    path.join(__dirname, '..', 'config', 'models', 'whisper.exe'),
-  ];
-
-  for (const bin of candidates) {
-    if (fs.existsSync(bin)) return bin;
-  }
-  return null;
-}
+let whisperCtx = null;
 
 function isLocalWhisperAvailable() {
-  return fs.existsSync(MODEL_PATH) && findWhisperBinary() !== null;
+  try {
+    require('whisper-cpp-node');
+    return fs.existsSync(MODEL_PATH);
+  } catch {
+    return false;
+  }
 }
 
-// Transcribe a WAV file using local whisper.cpp binary
-async function transcribeLocal(wavPath) {
-  const binary = findWhisperBinary();
-  if (!binary) throw new Error('No whisper binary found in config/models/');
-  if (!fs.existsSync(MODEL_PATH)) throw new Error('Whisper model not found at config/models/ggml-small.en.bin');
+function getWhisperContext() {
+  if (whisperCtx) return whisperCtx;
 
-  return new Promise((resolve, reject) => {
-    const args = [
-      '-m', MODEL_PATH,
-      '-f', wavPath,
-      '--no-timestamps',
-      '-l', 'en',
-    ];
-
-    execFile(binary, args, { timeout: 30000 }, (err, stdout, stderr) => {
-      if (err) {
-        reject(new Error(`Whisper transcription failed: ${err.message}`));
-        return;
-      }
-      // whisper.cpp outputs text with leading/trailing whitespace
-      const text = stdout.trim();
-      resolve(text);
-    });
+  const { createWhisperContext } = require('whisper-cpp-node');
+  whisperCtx = createWhisperContext({
+    model: MODEL_PATH,
+    use_gpu: true,
   });
+  return whisperCtx;
 }
 
-// Save raw PCM/WAV buffer from renderer to a temp file
+// Transcribe a WAV file
+async function transcribeFile(wavPath) {
+  const { transcribeAsync } = require('whisper-cpp-node');
+  const ctx = getWhisperContext();
+
+  const result = await transcribeAsync(ctx, {
+    fname_inp: wavPath,
+    language: 'en',
+  });
+
+  const text = result.segments.map(s => s.text).join('').trim();
+  return text;
+}
+
+// Transcribe from a raw audio buffer (Float32Array PCM at 16kHz)
+async function transcribeBuffer(float32Array) {
+  const { transcribeAsync } = require('whisper-cpp-node');
+  const ctx = getWhisperContext();
+
+  const result = await transcribeAsync(ctx, {
+    pcmf32: float32Array,
+    language: 'en',
+  });
+
+  const text = result.segments.map(s => s.text).join('').trim();
+  return text;
+}
+
+// Save raw audio buffer to temp WAV file
 function saveTempWav(buffer) {
   const tmpDir = os.tmpdir();
   const tmpPath = path.join(tmpDir, `atlas_voice_${Date.now()}.wav`);
@@ -61,4 +66,11 @@ function cleanupTempFile(filePath) {
   try { fs.unlinkSync(filePath); } catch {}
 }
 
-module.exports = { isLocalWhisperAvailable, transcribeLocal, saveTempWav, cleanupTempFile };
+function cleanup() {
+  if (whisperCtx) {
+    try { whisperCtx.free(); } catch {}
+    whisperCtx = null;
+  }
+}
+
+module.exports = { isLocalWhisperAvailable, transcribeFile, transcribeBuffer, saveTempWav, cleanupTempFile, cleanup };

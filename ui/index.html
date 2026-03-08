@@ -31,11 +31,19 @@
       <div class="nav-item" data-screen="sessions">
         <span class="nav-icon">&#128337;</span> Sessions
       </div>
-      <div class="nav-item" data-screen="files">
-        <span class="nav-icon">&#128196;</span> Files
+      <div class="nav-section-header" id="sources-toggle">
+        <span>Sources</span>
+        <span class="nav-section-arrow" id="sources-arrow">&#9662;</span>
       </div>
-      <div class="nav-item" data-screen="email">
-        <span class="nav-icon">&#9993;</span> Email
+      <div class="nav-section-items" id="sources-items">
+        <div class="nav-item" data-screen="email">
+          <span class="nav-icon">&#9993;</span> Email
+          <span class="nav-source-status" id="source-status-email"></span>
+        </div>
+        <div class="nav-item" data-screen="files">
+          <span class="nav-icon">&#128196;</span> Files
+          <span class="nav-source-status" id="source-status-files"></span>
+        </div>
       </div>
       <div class="nav-item" data-screen="settings">
         <span class="nav-icon">&#9881;</span> Settings
@@ -153,7 +161,7 @@
     <div class="screen" id="screen-actions">
       <div class="screen-header">
         <h1>Actions</h1>
-        <p>Track commitments and follow through.</p>
+        <p>Actions are commitments Atlas extracts from your conversations. When you agree to do something during a session, it appears here with a due date and follow-up tracking.</p>
       </div>
       <div class="filter-bar">
         <select class="form-select" id="actions-filter-status">
@@ -222,7 +230,7 @@
       <div class="screen-header" style="display:flex;justify-content:space-between;align-items:center">
         <div>
           <h1>Files</h1>
-          <p>Documents ingested into Atlas.</p>
+          <p>Upload documents that help Atlas advise you — CVs, job descriptions, bank statements, course materials, or anything relevant to your goals. Each file can be linked to a specific goal. Atlas reads the content and uses it as context in your sessions.</p>
         </div>
         <button class="btn btn-primary" id="btn-upload-file">Upload File</button>
       </div>
@@ -279,6 +287,9 @@
         </div>
       </div>
       <div class="chat-input-bar" id="context-interview-input-bar">
+        <button class="btn btn-icon btn-mic" id="btn-context-mic" title="Push to talk">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+        </button>
         <input type="text" class="chat-input" id="context-interview-input" placeholder="Tell Atlas about yourself..." autocomplete="off">
         <button class="btn btn-primary" id="btn-context-interview-send">Send</button>
       </div>

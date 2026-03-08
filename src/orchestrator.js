@@ -16,7 +16,21 @@ const DEFAULT_CONTEXT_SOURCES = {
   files: 'included',
   web_search: 'included',
   memory: 'included',
+  agents: ['meta-analyst'],
 };
+
+const AGENT_DEFAULTS_BY_TYPE = {
+  career:        ['job-search', 'financial', 'day-planner', 'learning'],
+  financial:     ['financial', 'day-planner'],
+  learning:      ['learning', 'day-planner'],
+  health:        ['nutrition', 'fitness', 'day-planner', 'habit-formation'],
+  business:      ['financial', 'day-planner', 'learning'],
+  personal:      ['day-planner'],
+  relationships: ['communication', 'day-planner'],
+  creative:      ['creative-process', 'day-planner', 'learning'],
+};
+
+const PERSPECTIVE_FALLBACK = ['meta-analyst', 'day-planner'];
 
 function getGoalSourcePolicy(goals) {
   // Merge source policies across all active goals
@@ -66,16 +80,83 @@ function loadUserContext() {
   };
 }
 
-function loadAgentSpecs() {
+function listAgentFiles() {
+  const agentsDir = path.join(CONFIG_DIR, 'agents');
+  try {
+    return fs.readdirSync(agentsDir).filter((f) => f.endsWith('.md'));
+  } catch { return []; }
+}
+
+function loadAgentSpecs(agentNames) {
   const agentsDir = path.join(CONFIG_DIR, 'agents');
   const specs = [];
   try {
-    const files = fs.readdirSync(agentsDir).filter((f) => f.endsWith('.md'));
+    const files = listAgentFiles();
     for (const file of files) {
-      specs.push(loadFile(path.join(agentsDir, file)));
+      if (agentNames) {
+        const name = file.replace(/\.md$/, '');
+        if (!agentNames.includes(name)) continue;
+      }
+      specs.push({ name: file.replace(/\.md$/, ''), content: loadFile(path.join(agentsDir, file)) });
     }
   } catch {}
   return specs;
+}
+
+function getGoalAgentPolicy(goals) {
+  // Union agent lists across all active goals, always include meta-analyst
+  const agentSet = new Set(['meta-analyst']);
+
+  for (const g of goals) {
+    const sources = (g.goal_data && g.goal_data.context_sources) || DEFAULT_CONTEXT_SOURCES;
+    const agents = Array.isArray(sources.agents) ? sources.agents : DEFAULT_CONTEXT_SOURCES.agents;
+    for (const a of agents) agentSet.add(a);
+  }
+
+  return [...agentSet];
+}
+
+// Migrate a goal's context_sources to ensure agents is always an explicit array
+function migrateGoalSources(goalData, type) {
+  if (!goalData.context_sources) {
+    goalData.context_sources = { ...DEFAULT_CONTEXT_SOURCES };
+  }
+  if (!Array.isArray(goalData.context_sources.agents)) {
+    const typeAgents = AGENT_DEFAULTS_BY_TYPE[type || goalData.type] || PERSPECTIVE_FALLBACK;
+    goalData.context_sources.agents = [...new Set([...typeAgents, 'meta-analyst'])];
+  }
+  return goalData;
+}
+
+// Generate a perspective file via Claude
+async function generatePerspective(name, domain) {
+  const prompt = `Create an advisory perspective file for "${domain}". Follow this exact format:
+
+# [Perspective Name]
+
+## Role
+[1-2 sentences describing what this perspective focuses on]
+
+## Focus Areas
+- [Area 1]
+- [Area 2]
+- [Area 3]
+- [Area 4]
+
+## Output Format
+[1 sentence: how insights from this perspective should be structured]
+
+Keep it under 25 lines. Be specific to the domain, not generic. The perspective name should be a professional title.`;
+
+  const content = await callClaude(prompt, 'You create concise advisory perspective files. Output only the markdown content, nothing else.');
+  const agentsDir = path.join(CONFIG_DIR, 'agents');
+  const filePath = path.join(agentsDir, `${name}.md`);
+  fs.writeFileSync(filePath, content.trim(), 'utf-8');
+  return content.trim();
+}
+
+function perspectiveExists(name) {
+  return fs.existsSync(path.join(CONFIG_DIR, 'agents', `${name}.md`));
 }
 
 function loadMethodology() {
@@ -198,7 +279,8 @@ function rankContextSections(recentEntries, recentSessions, persistentEntries, c
 
 async function buildSystemPrompt(goals, options = {}) {
   const userCtx = loadUserContext();
-  const agentSpecs = loadAgentSpecs();
+  const agentPolicy = getGoalAgentPolicy(goals);
+  const agentSpecs = loadAgentSpecs(agentPolicy);
   const methodology = loadMethodology();
 
   const goalsBlock = goals.length > 0
@@ -257,7 +339,7 @@ ${overdueActions.length > 0 ? `\n⚠️ OVERDUE:\n${formatActions(overdueActions
 ## Internal Advisory Perspectives
 Consider each of these perspectives when forming your response, but present a single unified voice. Never reference these perspectives by name to the user.
 
-${agentSpecs.join('\n\n---\n\n')}
+${agentSpecs.map(s => s.content).join('\n\n---\n\n')}
 ${methodology ? `\n\n## Advisory Methodology\n${methodology}` : ''}
 ${extraContext ? `\n## Additional Context\n${extraContext}` : ''}
 
@@ -277,7 +359,8 @@ Context marked [user-maintained] was written by the user. Context marked [auto-c
 10. You have access to web search. Use it when you need current information -- job listings, company details, market data, news, or any factual claim you are not certain about. Do not guess at statistics or current facts when you could search instead. If you need to search, output [SEARCH: your query] and the system will execute it.
 11. You can recall past memory by outputting [RECALL: topic]. The system will search archived entries and feed results back to you.
 12. You can search the user's email history by outputting [EMAIL_SEARCH: query]. Use Gmail search syntax (sender, subject keywords, date ranges). Use this when you need older email context beyond the current session's scanned window.
-13. Never reference your own build documentation, phase plans, internal project files, or development process in advisory conversations. You are Atlas the adviser, not a software project. If the user asks about Atlas itself, keep the answer brief and redirect to their goals.`;
+13. Never reference your own build documentation, phase plans, internal project files, or development process in advisory conversations. You are Atlas the adviser, not a software project. If the user asks about Atlas itself, keep the answer brief and redirect to their goals.
+14. Keep responses concise. Do not restate the same point in different words within a single response. Say it once, clearly, and move on.`;
 
   // Build trimmable sections with context ranking
   const trimmableSections = rankContextSections(
@@ -352,6 +435,9 @@ Context marked [user-maintained] was written by the user. Context marked [auto-c
     },
     sourcePolicy,
     sourceExclusions,
+    agentPolicy,
+    loadedAgents: agentSpecs.map(s => s.name),
+    availableAgents: listAgentFiles().map(f => f.replace(/\.md$/, '')),
   };
 
   return prompt;
@@ -416,7 +502,8 @@ function callClaudeConversation(prompt, systemPrompt, conversationHistory) {
 
 module.exports = {
   buildSystemPrompt, callClaude, callClaudeStreaming, callClaudeConversation,
-  loadUserContext, loadAgentSpecs, checkUserContextFiles,
-  getLastDiagnostics, generateGoalId, DEFAULT_CONTEXT_SOURCES,
+  loadUserContext, loadAgentSpecs, listAgentFiles, checkUserContextFiles,
+  getLastDiagnostics, generateGoalId, DEFAULT_CONTEXT_SOURCES, AGENT_DEFAULTS_BY_TYPE,
+  migrateGoalSources, generatePerspective, perspectiveExists,
   getEngine, setEngine, getAvailableEngines,
 };

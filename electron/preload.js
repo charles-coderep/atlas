@@ -113,6 +113,12 @@ contextBridge.exposeInMainWorld('atlas', {
   // Settings
   settings: {
     getAgentSpecs: () => ipcRenderer.invoke('settings:getAgentSpecs'),
+    listAgentFiles: () => ipcRenderer.invoke('settings:listAgentFiles'),
+    saveAgentSpec: (name, content) => ipcRenderer.invoke('settings:saveAgentSpec', name, content),
+    deleteAgentSpec: (name) => ipcRenderer.invoke('settings:deleteAgentSpec', name),
+    getAgentDefaults: () => ipcRenderer.invoke('settings:getAgentDefaults'),
+    generatePerspective: (name, domain) => ipcRenderer.invoke('settings:generatePerspective', name, domain),
+    perspectiveExists: (name) => ipcRenderer.invoke('settings:perspectiveExists', name),
     getMethodology: () => ipcRenderer.invoke('settings:getMethodology'),
     isGoogleConfigured: () => ipcRenderer.invoke('settings:isGoogleConfigured'),
     getDiagnostics: () => ipcRenderer.invoke('settings:getDiagnostics'),
