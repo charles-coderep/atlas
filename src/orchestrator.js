@@ -265,6 +265,25 @@ function syncPreferencesTone(toneName) {
   return content;
 }
 
+function detectToneFromPreferences() {
+  const content = loadFile(path.join(CONFIG_DIR, 'user', 'PREFERENCES.md'));
+  const match = content.match(/\*\*Directness level:\*\*\s*(\w+)/i);
+  if (!match) return null;
+  const raw = match[1].toLowerCase();
+  if (VALID_TONES.includes(raw)) return raw;
+  return null;
+}
+
+function syncToneFromPreferences() {
+  const fileTone = detectToneFromPreferences();
+  if (!fileTone) return;
+  const currentTone = getSelectedTone();
+  if (fileTone !== currentTone) {
+    console.log(`[Tone] Syncing from PREFERENCES.md: ${currentTone} → ${fileTone}`);
+    writeRuntimeSettings({ activeTone: fileTone });
+  }
+}
+
 function setSelectedTone(name) {
   const normalized = normalizeToneName(name);
   writeRuntimeSettings({ activeTone: normalized });
@@ -662,19 +681,6 @@ function getAvailableTones() {
   }));
 }
 
-module.exports = {
-  buildSystemPrompt, callEngine, callEngineStreaming, callEngineConversation,
-  callClaude: callEngine,
-  callClaudeStreaming: callEngineStreaming,
-  callClaudeConversation: callEngineConversation,
-  loadUserContext, loadAgentSpecs, listAgentFiles, checkUserContextFiles,
-  getLastDiagnostics, generateGoalId, DEFAULT_CONTEXT_SOURCES, AGENT_DEFAULTS_BY_TYPE,
-  migrateGoalSources, generatePerspective, perspectiveExists,
-  getEngine, setEngine, getAvailableEngines, getActiveEngineName,
-  getGoalSourcePolicy,
-  getSelectedTone, setSelectedTone, getAvailableTones, loadToneOverlay, mapDirectnessToTone, syncPreferencesTone,
-};
-
 async function callEngine(prompt, systemPrompt, options = {}) {
   const startedAt = Date.now();
   const label = options.label || 'Active AI engine responded';
@@ -704,3 +710,17 @@ function callEngineConversation(prompt, systemPrompt, conversationHistory) {
 
   return callEngine(fullPrompt, systemPrompt);
 }
+
+module.exports = {
+  buildSystemPrompt, callEngine, callEngineStreaming, callEngineConversation,
+  callClaude: callEngine,
+  callClaudeStreaming: callEngineStreaming,
+  callClaudeConversation: callEngineConversation,
+  loadUserContext, loadAgentSpecs, listAgentFiles, checkUserContextFiles,
+  getLastDiagnostics, generateGoalId, DEFAULT_CONTEXT_SOURCES, AGENT_DEFAULTS_BY_TYPE,
+  migrateGoalSources, generatePerspective, perspectiveExists,
+  getEngine, setEngine, getAvailableEngines, getActiveEngineName,
+  getGoalSourcePolicy,
+  getSelectedTone, setSelectedTone, getAvailableTones, loadToneOverlay, mapDirectnessToTone, syncPreferencesTone,
+  detectToneFromPreferences, syncToneFromPreferences,
+};

@@ -485,7 +485,7 @@ async function sendChatMessage() {
   const thinkingEl = showTypingIndicator('chat-messages');
 
   try {
-    const result = await atlas.chat.sendStreaming(message);
+    const result = await atlas.chat.send(message, { streaming: true });
     console.log(`[Timing] Chat request completed in ${Math.round(performance.now() - requestStartedAt)}ms`);
 
     // Remove typing indicator if streaming never started
@@ -998,7 +998,7 @@ async function sendGoalInterviewMessage() {
   try {
     let result;
     try {
-      result = await atlas.interview.sendStreaming(message);
+      result = await atlas.interview.send(message, { streaming: true });
       if (result && result.error) throw new Error(result.error);
     } catch {
       atlas.interview.removeStreamListeners();
@@ -1340,7 +1340,7 @@ async function requestContextInterview(message, history) {
   try {
     let result;
     try {
-      result = await atlas.context.interviewStreaming(contextInterviewFile, message, history);
+      result = await atlas.context.interview(contextInterviewFile, message, history, { streaming: true });
       if (result && result.error) throw new Error(result.error);
     } catch {
       atlas.context.removeStreamListeners();
@@ -2578,7 +2578,7 @@ function stopVoice() {
 
 // Convert webm/opus audio to 16kHz mono WAV for Whisper
 async function convertToWav(webmBuffer) {
-  const audioCtx = new OfflineAudioContext(1, 16000 * 30, 16000); // 30 sec max
+  const audioCtx = new OfflineAudioContext(1, 16000 * 120, 16000); // 120 sec max
   const audioBuffer = await audioCtx.decodeAudioData(webmBuffer);
 
   // Resample to 16kHz mono

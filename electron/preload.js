@@ -85,8 +85,7 @@ contextBridge.exposeInMainWorld('atlas', {
   // Chat
   chat: {
     start: (options) => ipcRenderer.invoke('chat:start', options),
-    send: (message) => ipcRenderer.invoke('chat:send', message),
-    sendStreaming: (message) => ipcRenderer.invoke('chat:sendStreaming', message),
+    send: (message, options) => ipcRenderer.invoke('chat:send', message, options),
     end: () => ipcRenderer.invoke('chat:end'),
     prepare: (desc) => ipcRenderer.invoke('chat:prepare', desc),
     onProcessingStatus: (callback) => ipcRenderer.on('chat:processing-status', (_, status) => callback(status)),
@@ -131,8 +130,7 @@ contextBridge.exposeInMainWorld('atlas', {
     load: () => ipcRenderer.invoke('context:load'),
     save: (file, content) => ipcRenderer.invoke('context:save', file, content),
     checkPlaceholders: () => ipcRenderer.invoke('context:checkPlaceholders'),
-    interview: (file, message, history) => ipcRenderer.invoke('context:interview', file, message, history),
-    interviewStreaming: (file, message, history) => ipcRenderer.invoke('context:interviewStreaming', file, message, history),
+    interview: (file, message, history, options) => ipcRenderer.invoke('context:interview', file, message, history, options),
     onStreamChunk: (callback) => ipcRenderer.on('context:stream-chunk', (_, chunk) => callback(chunk)),
     onStreamEnd: (callback) => ipcRenderer.on('context:stream-end', () => callback()),
     onStreamError: (callback) => ipcRenderer.on('context:stream-error', (_, err) => callback(err)),
@@ -177,8 +175,7 @@ contextBridge.exposeInMainWorld('atlas', {
   // Interview (conversational)
   interview: {
     start: (options) => ipcRenderer.invoke('interview:start', options),
-    send: (message) => ipcRenderer.invoke('interview:send', message),
-    sendStreaming: (message) => ipcRenderer.invoke('interview:sendStreaming', message),
+    send: (message, options) => ipcRenderer.invoke('interview:send', message, options),
     complete: () => ipcRenderer.invoke('interview:complete'),
     structure: (answers) => ipcRenderer.invoke('interview:structure', answers),
     onStreamChunk: (callback) => ipcRenderer.on('interview:stream-chunk', (_, chunk) => callback(chunk)),

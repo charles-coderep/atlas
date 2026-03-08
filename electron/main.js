@@ -1,5 +1,6 @@
 const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
+const fs = require('fs');
 
 // Load .env â€” check app root first, then resources directory for packaged app
 const envPaths = [
@@ -12,6 +13,20 @@ for (const p of envPaths) {
 }
 
 const db = require('../src/db');
+const {
+  buildSystemPrompt, callEngine, callEngineStreaming, callEngineConversation,
+  loadUserContext, checkUserContextFiles, getGoalSourcePolicy,
+  generateGoalId, getAvailableEngines, getActiveEngineName, setEngine, getEngine,
+  getAvailableTones, setSelectedTone, getSelectedTone, loadToneOverlay, mapDirectnessToTone,
+  loadAgentSpecs, listAgentFiles, generatePerspective, perspectiveExists,
+  getLastDiagnostics, DEFAULT_CONTEXT_SOURCES, AGENT_DEFAULTS_BY_TYPE,
+  migrateGoalSources, syncPreferencesTone, syncToneFromPreferences,
+} = require('../src/orchestrator');
+const { processSession, runUserModelGeneration, runPatternDetection } = require('../src/processor');
+const { webSearch } = require('../src/search');
+const { ingestFile, listFiles, getFile: getFileRecord } = require('../src/files');
+const { isGoogleConfigured } = require('../src/setup');
+const { readRuntimeJson, writeRuntimeJson } = require('../src/runtime');
 
 let mainWindow;
 
@@ -59,7 +74,6 @@ app.whenReady().then(async () => {
 
   // Migrate goals: ensure all have explicit agents arrays
   try {
-    const { migrateGoalSources } = require('../src/orchestrator');
     const allGoals = await db.getAllGoals();
     for (const g of allGoals) {
       const sources = g.goal_data?.context_sources;
@@ -71,6 +85,13 @@ app.whenReady().then(async () => {
     }
   } catch (err) {
     console.error('Goal migration error:', err.message);
+  }
+
+  // Sync tone from preferences file (in case user edited it directly)
+  try {
+    syncToneFromPreferences();
+  } catch (err) {
+    console.error('Tone sync error:', err.message);
   }
 
   app.on('activate', () => {
@@ -92,8 +113,6 @@ function registerIPC() {
   // --- Shared prompt builders ---
 
   function buildGoalInterviewPrompt(cleanName) {
-    const { AGENT_DEFAULTS_BY_TYPE } = require('../src/orchestrator');
-
     return `You are Atlas, a strategic adviser helping define a goal. Warm, direct, personable.
 
 Rules:
@@ -176,18 +195,9 @@ Gather information through conversation. When you have enough, start your respon
   ipcMain.handle('overrides:update', (_, id, updates) => db.updateOverride(id, updates));
 
   // --- DB: Files ---
-  ipcMain.handle('files:list', () => {
-    const { listFiles } = require('../src/files');
-    return listFiles();
-  });
-  ipcMain.handle('files:get', (_, id) => {
-    const { getFile } = require('../src/files');
-    return getFile(id);
-  });
-  ipcMain.handle('files:ingest', async (_, filePath, goalId) => {
-    const { ingestFile } = require('../src/files');
-    return ingestFile(filePath, goalId);
-  });
+  ipcMain.handle('files:list', () => listFiles());
+  ipcMain.handle('files:get', (_, id) => getFileRecord(id));
+  ipcMain.handle('files:ingest', (_, filePath, goalId) => ingestFile(filePath, goalId));
   ipcMain.handle('files:delete', async (_, id) => {
     const client = db.getClient();
     const { error } = await client.from('files').delete().eq('id', id);
@@ -199,7 +209,6 @@ Gather information through conversation. When you have enough, start your respon
       filters: [{ name: 'Documents', extensions: ['txt', 'md', 'pdf', 'csv', 'json'] }],
     });
     if (result.canceled || result.filePaths.length === 0) return null;
-    const { ingestFile } = require('../src/files');
     return ingestFile(result.filePaths[0], goalId);
   });
 
@@ -211,11 +220,8 @@ Gather information through conversation. When you have enough, start your respon
   // --- AI: Brief ---
   ipcMain.handle('brief:generate', async (_, options) => {
     const briefStartedAt = Date.now();
-    const { getActiveGoals } = db;
-    const { buildSystemPrompt, callEngine, getGoalSourcePolicy } = require('../src/orchestrator');
-    const { getOpenActions, getOverdueActions } = db;
 
-    const goals = await getActiveGoals();
+    const goals = await db.getActiveGoals();
     const allGoals = await db.getAllGoals();
     console.log('[Brief] Active goals:', goals.length, '| All goals:', allGoals.length);
     console.log('[Brief] Goal statuses:', allGoals.map(g => `${g.id}: ${g.status}`).join(', '));
@@ -230,8 +236,8 @@ Gather information through conversation. When you have enough, start your respon
     const systemPrompt = await buildSystemPrompt(goals, filteredOptions);
     logTiming('System prompt built', promptStartedAt);
     console.log('[Brief] System prompt length:', systemPrompt.length);
-    const openActions = await getOpenActions();
-    const overdueActions = await getOverdueActions();
+    const openActions = await db.getOpenActions();
+    const overdueActions = await db.getOverdueActions();
     console.log('[Brief] Actions:', openActions.length, 'open,', overdueActions.length, 'overdue');
 
     const today = new Date().toLocaleDateString('en-GB', {
@@ -288,13 +294,13 @@ Keep it scannable. Under 3 minutes to read. Reference specific past events and c
   let chatSession = null;
   let chatHistory = [];
   let chatSystemPrompt = '';
+  let chatSending = false;
 
   ipcMain.handle('chat:start', async (_, options) => {
     const chatStartTime = Date.now();
     const goals = await db.getActiveGoals();
     if (goals.length === 0) return { error: 'No active goals. Create a goal first.' };
 
-    const { buildSystemPrompt, callEngine, checkUserContextFiles } = require('../src/orchestrator');
     const promptStartedAt = Date.now();
     chatSystemPrompt = await buildSystemPrompt(goals, options || {});
     logTiming('System prompt built', promptStartedAt);
@@ -390,66 +396,103 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
     }
   }
 
-  ipcMain.handle('chat:send', async (_, message) => {
+  ipcMain.handle('chat:send', async (_, message, options = {}) => {
     if (!chatSession) return { error: 'No active session' };
+    if (chatSending) return { error: 'Already processing a message' };
+    chatSending = true;
 
-    const { callEngineConversation } = require('../src/orchestrator');
-    const { webSearch } = require('../src/search');
-    const { searchGmail } = require('../src/integrations/gmail');
+    const streaming = options.streaming !== false; // default to streaming
 
-    chatHistory.push({ role: 'User', content: message });
-    windowHistory();
+    try {
+      chatHistory.push({ role: 'User', content: message });
+      windowHistory();
 
-    let response = await callEngineConversation(message, chatSystemPrompt, chatHistory.slice(0, -1));
+      let response;
 
-    // Process markers
-    const markers = [];
-    const searchPattern = /\[SEARCH:\s*(.+?)\]/g;
-    const recallPattern = /\[RECALL:\s*(.+?)\]/g;
-    const emailPattern = /\[EMAIL_SEARCH:\s*(.+?)\]/g;
+      if (streaming) {
+        const historyPrefix = chatHistory.slice(0, -1);
+        const fullPrompt = historyPrefix.length > 0
+          ? `Previous conversation:\n${historyPrefix.map((m) => `${m.role}: ${m.content}`).join('\n')}\n\nUser: ${message}`
+          : message;
 
-    const searchMatches = [...response.matchAll(searchPattern)];
-    const recallMatches = [...response.matchAll(recallPattern)];
-    const emailMatches = [...response.matchAll(emailPattern)];
-
-    if (searchMatches.length > 0 || recallMatches.length > 0 || emailMatches.length > 0) {
-      const contextParts = [];
-
-      for (const m of searchMatches) {
-        markers.push({ type: 'search', query: m[1].trim() });
-        const result = await webSearch(m[1].trim(), chatSystemPrompt);
-        contextParts.push(`Web search results for "${m[1].trim()}":\n${result}`);
+        let fullResponse = '';
+        try {
+          fullResponse = await callEngineStreaming(fullPrompt, chatSystemPrompt, {}, (chunk) => {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('chat:stream-chunk', chunk);
+            }
+          });
+        } catch (err) {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('chat:stream-error', err.message);
+          }
+          return { error: err.message };
+        }
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('chat:stream-end');
+        }
+        response = fullResponse;
+      } else {
+        response = await callEngineConversation(message, chatSystemPrompt, chatHistory.slice(0, -1));
       }
-      for (const m of emailMatches) {
-        markers.push({ type: 'email_search', query: m[1].trim() });
-        const results = await searchGmail(m[1].trim());
-        if (results.length > 0) {
-          const formatted = results.map((r) => `From: ${r.from}\nSubject: ${r.subject}\nDate: ${r.date}\nPreview: ${r.snippet}`).join('\n\n');
-          contextParts.push(`Email search results for "${m[1].trim()}":\n${formatted}`);
+
+      // Process markers (shared for both paths)
+      const markers = [];
+      const searchPattern = /\[SEARCH:\s*(.+?)\]/g;
+      const recallPattern = /\[RECALL:\s*(.+?)\]/g;
+      const emailPattern = /\[EMAIL_SEARCH:\s*(.+?)\]/g;
+
+      const searchMatches = [...response.matchAll(searchPattern)];
+      const recallMatches = [...response.matchAll(recallPattern)];
+      const emailMatches = [...response.matchAll(emailPattern)];
+
+      if (searchMatches.length > 0 || recallMatches.length > 0 || emailMatches.length > 0) {
+        const contextParts = [];
+        for (const m of searchMatches) {
+          markers.push({ type: 'search', query: m[1].trim() });
+          const result = await webSearch(m[1].trim(), chatSystemPrompt);
+          contextParts.push(`Web search results for "${m[1].trim()}":\n${result}`);
+        }
+        for (const m of emailMatches) {
+          markers.push({ type: 'email_search', query: m[1].trim() });
+          try {
+            const { searchGmail } = require('../src/integrations/gmail');
+            const results = await searchGmail(m[1].trim());
+            if (results.length > 0) {
+              const formatted = results.map((r) => `From: ${r.from}\nSubject: ${r.subject}\nDate: ${r.date}\nPreview: ${r.snippet}`).join('\n\n');
+              contextParts.push(`Email search results for "${m[1].trim()}":\n${formatted}`);
+            }
+          } catch {}
+        }
+        for (const m of recallMatches) {
+          markers.push({ type: 'recall', query: m[1].trim() });
+          const keywords = m[1].trim().split(/\s+/).filter((w) => w.length > 2);
+          const entries = await db.searchEntries(keywords, 5);
+          if (entries.length > 0) {
+            const context = entries.map((e) => `[${e.date}] [${e.entry_type}] ${e.content}`).join('\n');
+            contextParts.push(`Memory results for "${m[1].trim()}":\n${context}`);
+          }
+        }
+
+        if (contextParts.length > 0) {
+          const refinedPrompt = `Here is the information you requested:\n\n${contextParts.join('\n\n---\n\n')}\n\nNow incorporate all of this into your advice. Cite what you found. Be specific.`;
+          response = await callEngineConversation(refinedPrompt, chatSystemPrompt, chatHistory);
+          if (streaming && mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('chat:stream-replace', response);
+          }
         }
       }
-      for (const m of recallMatches) {
-        markers.push({ type: 'recall', query: m[1].trim() });
-        const keywords = m[1].trim().split(/\s+/).filter((w) => w.length > 2);
-        const entries = await db.searchEntries(keywords, 5);
-        if (entries.length > 0) {
-          const context = entries.map((e) => `[${e.date}] [${e.entry_type}] ${e.content}`).join('\n');
-          contextParts.push(`Memory results for "${m[1].trim()}":\n${context}`);
-        }
-      }
 
-      if (contextParts.length > 0) {
-        const refinedPrompt = `Here is the information you requested:\n\n${contextParts.join('\n\n---\n\n')}\n\nNow incorporate all of this into your advice. Cite what you found. Be specific.`;
-        response = await callEngineConversation(refinedPrompt, chatSystemPrompt, chatHistory);
-      }
+      chatHistory.push({ role: 'Atlas', content: response });
+      return { response, markers };
+    } finally {
+      chatSending = false;
     }
-
-    chatHistory.push({ role: 'Atlas', content: response });
-    return { response, markers };
   });
 
   ipcMain.handle('chat:end', async () => {
     if (!chatSession) return null;
+    chatSending = false;
 
     const duration = chatSession ? Math.round((Date.now() - new Date(chatSession.created_at).getTime()) / 60000) : 0;
 
@@ -459,17 +502,14 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('chat:processing-status', 'Extracting session insights...');
         }
-        const { processSession } = require('../src/processor');
         result = await processSession(chatSession.id, chatHistory, duration);
 
         // Check if user model / pattern detection should run (every 5 sessions)
         try {
-          const { readRuntimeJson, writeRuntimeJson } = require('../src/runtime');
           const settings = readRuntimeJson('settings.json', {});
           const count = (settings.sessionsSinceLastUserModel || 0) + 1;
           if (count >= 5) {
             writeRuntimeJson('settings.json', { ...settings, sessionsSinceLastUserModel: 0 });
-            const { runUserModelGeneration, runPatternDetection } = require('../src/processor');
             // Run in background — don't block session end
             runUserModelGeneration().then(m => { if (m) console.log('[UserModel] Regenerated'); });
             runPatternDetection().then(r => console.log(`[Patterns] Detected ${r.detected}, saved ${r.saved}`));
@@ -494,86 +534,7 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
     return { sessionId, ...result };
   });
 
-  // --- AI: Chat Streaming ---
-  ipcMain.handle('chat:sendStreaming', async (_, message) => {
-    if (!chatSession) return { error: 'No active session' };
-
-    const { callEngineStreaming, callEngineConversation } = require('../src/orchestrator');
-    const { webSearch } = require('../src/search');
-    const { searchGmail } = require('../src/integrations/gmail');
-
-    chatHistory.push({ role: 'User', content: message });
-    windowHistory();
-
-    // Build the full prompt with conversation history
-    const historyPrefix = chatHistory.slice(0, -1);
-    const fullPrompt = historyPrefix.length > 0
-      ? `Previous conversation:\n${historyPrefix.map((m) => `${m.role}: ${m.content}`).join('\n')}\n\nUser: ${message}`
-      : message;
-
-    let fullResponse = '';
-    try {
-      fullResponse = await callEngineStreaming(fullPrompt, chatSystemPrompt, {}, (chunk) => {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('chat:stream-chunk', chunk);
-        }
-      });
-    } catch (err) {
-      mainWindow.webContents.send('chat:stream-error', err.message);
-      return { error: err.message };
-    }
-
-    // Signal stream complete
-    mainWindow.webContents.send('chat:stream-end');
-
-    // Process markers on the full response
-    const markers = [];
-    const searchPattern = /\[SEARCH:\s*(.+?)\]/g;
-    const recallPattern = /\[RECALL:\s*(.+?)\]/g;
-    const emailPattern = /\[EMAIL_SEARCH:\s*(.+?)\]/g;
-
-    const searchMatches = [...fullResponse.matchAll(searchPattern)];
-    const recallMatches = [...fullResponse.matchAll(recallPattern)];
-    const emailMatches = [...fullResponse.matchAll(emailPattern)];
-
-    if (searchMatches.length > 0 || recallMatches.length > 0 || emailMatches.length > 0) {
-      const contextParts = [];
-      for (const m of searchMatches) {
-        markers.push({ type: 'search', query: m[1].trim() });
-        const result = await webSearch(m[1].trim(), chatSystemPrompt);
-        contextParts.push(`Web search results for "${m[1].trim()}":\n${result}`);
-      }
-      for (const m of emailMatches) {
-        markers.push({ type: 'email_search', query: m[1].trim() });
-        const results = await searchGmail(m[1].trim());
-        if (results.length > 0) {
-          const formatted = results.map((r) => `From: ${r.from}\nSubject: ${r.subject}\nDate: ${r.date}\nPreview: ${r.snippet}`).join('\n\n');
-          contextParts.push(`Email search results for "${m[1].trim()}":\n${formatted}`);
-        }
-      }
-      for (const m of recallMatches) {
-        markers.push({ type: 'recall', query: m[1].trim() });
-        const keywords = m[1].trim().split(/\s+/).filter((w) => w.length > 2);
-        const entries = await db.searchEntries(keywords, 5);
-        if (entries.length > 0) {
-          const context = entries.map((e) => `[${e.date}] [${e.entry_type}] ${e.content}`).join('\n');
-          contextParts.push(`Memory results for "${m[1].trim()}":\n${context}`);
-        }
-      }
-
-      if (contextParts.length > 0) {
-        // For marker follow-up, use buffered call and push the full response
-        const refinedPrompt = `Here is the information you requested:\n\n${contextParts.join('\n\n---\n\n')}\n\nNow incorporate all of this into your advice. Cite what you found. Be specific.`;
-        fullResponse = await callEngineConversation(refinedPrompt, chatSystemPrompt, chatHistory);
-        mainWindow.webContents.send('chat:stream-replace', fullResponse);
-      }
-    }
-
-    chatHistory.push({ role: 'Atlas', content: fullResponse });
-    return { response: fullResponse, markers };
-  });
-
-  // --- Voice: Transcription ---
+  // --- Voice: Transcription --- (lazy: optional integration)
   ipcMain.handle('voice:isAvailable', () => {
     const { isLocalWhisperAvailable } = require('../src/voice');
     return isLocalWhisperAvailable();
@@ -594,8 +555,6 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
 
   // --- Search ---
   ipcMain.handle('search:web', async (_, query) => {
-    const { webSearch } = require('../src/search');
-    const { buildSystemPrompt } = require('../src/orchestrator');
     const goals = await db.getActiveGoals();
     const systemPrompt = goals.length > 0 ? await buildSystemPrompt(goals) : '';
     return webSearch(query, systemPrompt);
@@ -633,13 +592,9 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
   });
 
   // --- User Context ---
-  ipcMain.handle('context:load', () => {
-    const { loadUserContext } = require('../src/orchestrator');
-    return loadUserContext();
-  });
+  ipcMain.handle('context:load', () => loadUserContext());
 
   ipcMain.handle('context:save', async (_, file, content) => {
-    const fs = require('fs');
     const configDir = path.join(__dirname, '..', 'config', 'user');
     const validFiles = ['IDENTITY.md', 'SITUATION.md', 'PREFERENCES.md'];
     if (!validFiles.includes(file)) throw new Error('Invalid context file');
@@ -649,28 +604,28 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
     if (chatSession) {
       try {
         const goals = await db.getActiveGoals();
-        const { buildSystemPrompt } = require('../src/orchestrator');
         chatSystemPrompt = await buildSystemPrompt(goals);
         console.log('[Context] System prompt rebuilt mid-session after file update');
       } catch (err) {
         console.error('[Context] Failed to rebuild prompt mid-session:', err.message);
       }
     }
+
+    // If PREFERENCES.md was saved, sync tone back to runtime settings
+    if (file === 'PREFERENCES.md') {
+      try {
+        syncToneFromPreferences();
+      } catch {}
+    }
   });
 
-  ipcMain.handle('context:checkPlaceholders', () => {
-    const { checkUserContextFiles } = require('../src/orchestrator');
-    return checkUserContextFiles();
-  });
+  ipcMain.handle('context:checkPlaceholders', () => checkUserContextFiles());
 
   // --- DB: Entries by Session ---
   ipcMain.handle('entries:getBySession', (_, sessionId) => db.getEntriesBySession(sessionId));
 
   // --- Settings ---
-  ipcMain.handle('settings:getDiagnostics', () => {
-    const { getLastDiagnostics } = require('../src/orchestrator');
-    return getLastDiagnostics();
-  });
+  ipcMain.handle('settings:getDiagnostics', () => getLastDiagnostics());
 
   ipcMain.handle('goals:updateSources', async (_, id, sources) => {
     const goal = await db.getGoal(id);
@@ -680,15 +635,10 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
     await db.saveGoal({ ...goal, goal_data: goalData });
   });
 
-  ipcMain.handle('goals:generateId', () => {
-    const { generateGoalId } = require('../src/orchestrator');
-    return generateGoalId();
-  });
+  ipcMain.handle('goals:generateId', () => generateGoalId());
 
   // --- PDF Export ---
   ipcMain.handle('export:pdf', async (_, htmlContent, title) => {
-    const fs = require('fs');
-    const { BrowserWindow: BW } = require('electron');
 
     const result = await dialog.showSaveDialog(mainWindow, {
       defaultPath: `Atlas_${title || 'Brief'}_${new Date().toISOString().split('T')[0]}.pdf`,
@@ -696,7 +646,7 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
     });
     if (result.canceled) return null;
 
-    const printWindow = new BW({ show: false, webPreferences: { nodeIntegration: false } });
+    const printWindow = new BrowserWindow({ show: false, webPreferences: { nodeIntegration: false } });
     const styledHtml = `<!DOCTYPE html><html><head><style>
       body { font-family: 'Segoe UI', sans-serif; color: #1a1a1a; padding: 40px; max-width: 700px; margin: 0 auto; line-height: 1.6; }
       h1 { font-size: 22px; margin-bottom: 4px; } h2 { font-size: 18px; margin-top: 20px; } h3 { font-size: 15px; }
@@ -720,7 +670,6 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
 
   // --- AI: End-of-Day Reflection ---
   ipcMain.handle('brief:reflection', async (_, options) => {
-    const { buildSystemPrompt, callEngine } = require('../src/orchestrator');
     const goals = await db.getActiveGoals();
     if (goals.length === 0) return null;
 
@@ -762,67 +711,41 @@ Under 2 minutes to read. No fluff. Reference specific actions and sessions.`;
   });
 
   // --- Engine Info ---
-  ipcMain.handle('settings:getEngines', async () => {
-    const { getAvailableEngines } = require('../src/orchestrator');
-    return getAvailableEngines();
-  });
+  ipcMain.handle('settings:getEngines', () => getAvailableEngines());
 
   ipcMain.handle('settings:setEngine', (_, name) => {
-    const { setEngine } = require('../src/orchestrator');
     setEngine(name);
     return { ok: true, activeEngine: name };
   });
 
-  ipcMain.handle('settings:getTones', () => {
-    const { getAvailableTones } = require('../src/orchestrator');
-    return getAvailableTones();
-  });
+  ipcMain.handle('settings:getTones', () => getAvailableTones());
 
   ipcMain.handle('settings:setTone', (_, name) => {
-    const { setSelectedTone } = require('../src/orchestrator');
     const tone = setSelectedTone(name);
     return { ok: true, tone };
   });
 
-  ipcMain.handle('settings:getAgentSpecs', () => {
-    const { loadAgentSpecs } = require('../src/orchestrator');
-    return loadAgentSpecs(); // returns [{ name, content }]
-  });
+  ipcMain.handle('settings:getAgentSpecs', () => loadAgentSpecs());
 
-  ipcMain.handle('settings:listAgentFiles', () => {
-    const { listAgentFiles } = require('../src/orchestrator');
-    return listAgentFiles().map(f => f.replace(/\.md$/, ''));
-  });
+  ipcMain.handle('settings:listAgentFiles', () => listAgentFiles().map(f => f.replace(/\.md$/, '')));
 
   ipcMain.handle('settings:saveAgentSpec', (_, name, content) => {
-    const fs = require('fs');
     const agentPath = path.join(__dirname, '..', 'config', 'agents', `${name}.md`);
     fs.writeFileSync(agentPath, content, 'utf-8');
   });
 
   ipcMain.handle('settings:deleteAgentSpec', (_, name) => {
-    const fs = require('fs');
     const agentPath = path.join(__dirname, '..', 'config', 'agents', `${name}.md`);
     if (fs.existsSync(agentPath)) fs.unlinkSync(agentPath);
   });
 
-  ipcMain.handle('settings:getAgentDefaults', () => {
-    const { AGENT_DEFAULTS_BY_TYPE } = require('../src/orchestrator');
-    return AGENT_DEFAULTS_BY_TYPE;
-  });
+  ipcMain.handle('settings:getAgentDefaults', () => AGENT_DEFAULTS_BY_TYPE);
 
-  ipcMain.handle('settings:generatePerspective', async (_, name, domain) => {
-    const { generatePerspective } = require('../src/orchestrator');
-    return generatePerspective(name, domain);
-  });
+  ipcMain.handle('settings:generatePerspective', (_, name, domain) => generatePerspective(name, domain));
 
-  ipcMain.handle('settings:perspectiveExists', (_, name) => {
-    const { perspectiveExists } = require('../src/orchestrator');
-    return perspectiveExists(name);
-  });
+  ipcMain.handle('settings:perspectiveExists', (_, name) => perspectiveExists(name));
 
   ipcMain.handle('settings:getMethodology', () => {
-    const fs = require('fs');
     const methodPath = path.join(__dirname, '..', 'config', 'engine', 'methodology.md');
     try {
       const content = fs.readFileSync(methodPath, 'utf-8');
@@ -839,10 +762,7 @@ Under 2 minutes to read. No fluff. Reference specific actions and sessions.`;
     }
   });
 
-  ipcMain.handle('settings:isGoogleConfigured', () => {
-    const { isGoogleConfigured } = require('../src/setup');
-    return isGoogleConfigured();
-  });
+  ipcMain.handle('settings:isGoogleConfigured', () => isGoogleConfigured());
 
   // --- Health Check ---
   ipcMain.handle('health:check', async () => {
@@ -856,11 +776,10 @@ Under 2 minutes to read. No fluff. Reference specific actions and sessions.`;
 
     // AI engine
     try {
-      const { getEngine, getActiveEngineName } = require('../src/orchestrator');
       const engine = getEngine();
       const available = await engine.isAvailable();
-      const name = getActiveEngineName();
-      status.ai = available ? { ok: true, label: `${name} ready` } : { ok: false, label: `${name} unavailable` };
+      const engineName = getActiveEngineName();
+      status.ai = available ? { ok: true, label: `${engineName} ready` } : { ok: false, label: `${engineName} unavailable` };
     } catch {
       status.ai = { ok: false, label: 'engine unavailable' };
     }
@@ -874,7 +793,6 @@ Under 2 minutes to read. No fluff. Reference specific actions and sessions.`;
 
     // Gmail
     try {
-      const { isGoogleConfigured } = require('../src/setup');
       const configured = isGoogleConfigured();
       status.gmail = configured ? { ok: true, label: 'connected' } : { ok: false, label: 'not set up' };
     } catch {}
@@ -896,9 +814,9 @@ Under 2 minutes to read. No fluff. Reference specific actions and sessions.`;
   let interviewHistory = [];
   let interviewMode = null; // 'create' | 'edit'
   let interviewGoalId = null;
+  let interviewSending = false;
 
   ipcMain.handle('interview:start', async (_, options) => {
-    const { callEngine, loadUserContext, generateGoalId } = require('../src/orchestrator');
     interviewHistory = [];
     interviewMode = options && options.goalId ? 'edit' : 'create';
     interviewGoalId = options && options.goalId ? options.goalId : null;
@@ -942,76 +860,65 @@ Under 2 minutes to read. No fluff. Reference specific actions and sessions.`;
     return { opening, goalId: interviewGoalId };
   });
 
-  ipcMain.handle('interview:send', async (_, message) => {
-    const { callEngineConversation } = require('../src/orchestrator');
+  ipcMain.handle('interview:send', async (_, message, options = {}) => {
+    if (interviewSending) return { error: 'Already processing' };
+    interviewSending = true;
 
-    const systemPrompt = buildGoalInterviewPrompt('');
+    const streaming = options.streaming !== false; // default to streaming
 
-    interviewHistory.push({ role: 'User', content: message });
-    const response = await callEngineConversation(message, systemPrompt, interviewHistory.slice(0, -1));
-    interviewHistory.push({ role: 'Atlas', content: response });
-
-    const isReady = response.trim().startsWith('GOAL_READY');
-    let cleanResponse = response.replace(/^GOAL_READY\n?/, '');
-
-    // Extract perspectives if present
-    let suggestedPerspectives = null;
-    const perspMatch = cleanResponse.match(/^PERSPECTIVES:\s*(.+)$/m);
-    if (perspMatch) {
-      suggestedPerspectives = perspMatch[1].split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
-      cleanResponse = cleanResponse.replace(/^PERSPECTIVES:.*$/m, '').trim();
-    }
-
-    return { response: cleanResponse, isReady, suggestedPerspectives };
-  });
-
-  ipcMain.handle('interview:sendStreaming', async (_, message) => {
-    const { callEngineStreaming } = require('../src/orchestrator');
-
-    const systemPrompt = buildGoalInterviewPrompt('');
-
-    const historyPrefix = [...interviewHistory];
-    const fullPrompt = historyPrefix.length > 0
-      ? `Previous conversation:\n${historyPrefix.map((m) => `${m.role}: ${m.content}`).join('\n')}\n\nUser: ${message}`
-      : message;
-
-    let fullResponse = '';
     try {
-      fullResponse = await callEngineStreaming(fullPrompt, systemPrompt, {}, (chunk) => {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('interview:stream-chunk', chunk);
+      const systemPrompt = buildGoalInterviewPrompt('');
+      let response;
+
+      if (streaming) {
+        const historyPrefix = [...interviewHistory];
+        const fullPrompt = historyPrefix.length > 0
+          ? `Previous conversation:\n${historyPrefix.map((m) => `${m.role}: ${m.content}`).join('\n')}\n\nUser: ${message}`
+          : message;
+
+        try {
+          response = await callEngineStreaming(fullPrompt, systemPrompt, {}, (chunk) => {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('interview:stream-chunk', chunk);
+            }
+          });
+        } catch (err) {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('interview:stream-error', err.message);
+          }
+          return { error: err.message };
         }
-      });
-    } catch (err) {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('interview:stream-error', err.message);
+
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('interview:stream-end');
+        }
+      } else {
+        interviewHistory.push({ role: 'User', content: message });
+        response = await callEngineConversation(message, systemPrompt, interviewHistory.slice(0, -1));
       }
-      return { error: err.message };
+
+      if (streaming) {
+        interviewHistory.push({ role: 'User', content: message });
+      }
+      interviewHistory.push({ role: 'Atlas', content: response });
+
+      const isReady = response.trim().startsWith('GOAL_READY');
+      let cleanResponse = response.replace(/^GOAL_READY\n?/, '');
+
+      let suggestedPerspectives = null;
+      const perspMatch = cleanResponse.match(/^PERSPECTIVES:\s*(.+)$/m);
+      if (perspMatch) {
+        suggestedPerspectives = perspMatch[1].split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+        cleanResponse = cleanResponse.replace(/^PERSPECTIVES:.*$/m, '').trim();
+      }
+
+      return { response: cleanResponse, isReady, suggestedPerspectives };
+    } finally {
+      interviewSending = false;
     }
-
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('interview:stream-end');
-    }
-
-    interviewHistory.push({ role: 'User', content: message });
-    interviewHistory.push({ role: 'Atlas', content: fullResponse });
-
-    const isReady = fullResponse.trim().startsWith('GOAL_READY');
-    let cleanResponse = fullResponse.replace(/^GOAL_READY\n?/, '');
-
-    let suggestedPerspectives = null;
-    const perspMatch = cleanResponse.match(/^PERSPECTIVES:\s*(.+)$/m);
-    if (perspMatch) {
-      suggestedPerspectives = perspMatch[1].split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
-      cleanResponse = cleanResponse.replace(/^PERSPECTIVES:.*$/m, '').trim();
-    }
-
-    return { response: cleanResponse, isReady, suggestedPerspectives };
   });
 
   ipcMain.handle('interview:complete', async () => {
-    const { callEngine, generateGoalId, DEFAULT_CONTEXT_SOURCES, mapDirectnessToTone, setSelectedTone } = require('../src/orchestrator');
-
     const transcript = interviewHistory.map((m) => `${m.role}: ${m.content}`).join('\n\n');
 
     const structurePrompt = `Here is a goal-definition conversation transcript:
@@ -1044,7 +951,6 @@ Return ONLY valid JSON. No explanation.`;
 
     // Assign perspectives based on goal type, create missing perspective files
     if (!goalData.context_sources) {
-      const { AGENT_DEFAULTS_BY_TYPE, perspectiveExists, generatePerspective } = require('../src/orchestrator');
       const typeAgents = AGENT_DEFAULTS_BY_TYPE[goalData.type] || ['day-planner'];
       const perspectives = [...new Set([...typeAgents, 'meta-analyst'])];
 
@@ -1088,7 +994,6 @@ Return ONLY valid JSON. No explanation.`;
 
   // Keep legacy handler for backward compat
   ipcMain.handle('interview:structure', async (_, answers) => {
-    const { callEngine } = require('../src/orchestrator');
     const prompt = `Structure these goal interview answers into a JSON goal record:
 
 ${JSON.stringify(answers, null, 2)}
@@ -1118,8 +1023,7 @@ Check the current file content. If any fields contain placeholder text, ask abou
 Check the current file content. If any fields contain placeholder text, ask about those fields first. Work through them one at a time. Only broaden to open questions once all fields have real content.`,
   };
 
-  ipcMain.handle('context:interview', async (_, file, message, history) => {
-    const { callEngineConversation, loadUserContext } = require('../src/orchestrator');
+  ipcMain.handle('context:interview', async (_, file, message, history, options = {}) => {
     const userCtx = loadUserContext();
 
     const fileLabels = {
@@ -1133,9 +1037,36 @@ Check the current file content. If any fields contain placeholder text, ask abou
 
     const systemPrompt = buildContextInterviewPrompt(file, info, contextFileGuidance);
 
-    const response = await callEngineConversation(message, systemPrompt, history || []);
-    const isReady = response.includes('CONTEXT_READY');
+    const streaming = options.streaming !== false; // default to streaming
+    let response;
 
+    if (streaming) {
+      const historyPrefix = history || [];
+      const fullPrompt = historyPrefix.length > 0
+        ? `Previous conversation:\n${historyPrefix.map((m) => `${m.role}: ${m.content}`).join('\n')}\n\nUser: ${message}`
+        : message;
+
+      try {
+        response = await callEngineStreaming(fullPrompt, systemPrompt, {}, (chunk) => {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('context:stream-chunk', chunk);
+          }
+        });
+      } catch (err) {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('context:stream-error', err.message);
+        }
+        return { error: err.message };
+      }
+
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('context:stream-end');
+      }
+    } else {
+      response = await callEngineConversation(message, systemPrompt, history || []);
+    }
+
+    const isReady = response.includes('CONTEXT_READY');
     let proposedContent = null;
     if (isReady) {
       const mdMatch = response.match(/```markdown\n([\s\S]*?)```/);
@@ -1144,58 +1075,6 @@ Check the current file content. If any fields contain placeholder text, ask abou
 
     return {
       response: response.replace(/^CONTEXT_READY\n?/, ''),
-      isReady,
-      proposedContent,
-    };
-  });
-
-  ipcMain.handle('context:interviewStreaming', async (_, file, message, history) => {
-    const { callEngineStreaming, loadUserContext } = require('../src/orchestrator');
-    const userCtx = loadUserContext();
-
-    const fileLabels = {
-      'IDENTITY.md': { label: 'Identity', current: userCtx.identity },
-      'SITUATION.md': { label: 'Situation', current: userCtx.situation },
-      'PREFERENCES.md': { label: 'Preferences', current: userCtx.preferences },
-    };
-
-    const info = fileLabels[file];
-    if (!info) throw new Error('Invalid context file');
-
-    const systemPrompt = buildContextInterviewPrompt(file, info, contextFileGuidance);
-
-    const historyPrefix = history || [];
-    const fullPrompt = historyPrefix.length > 0
-      ? `Previous conversation:\n${historyPrefix.map((m) => `${m.role}: ${m.content}`).join('\n')}\n\nUser: ${message}`
-      : message;
-
-    let fullResponse = '';
-    try {
-      fullResponse = await callEngineStreaming(fullPrompt, systemPrompt, {}, (chunk) => {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('context:stream-chunk', chunk);
-        }
-      });
-    } catch (err) {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('context:stream-error', err.message);
-      }
-      return { error: err.message };
-    }
-
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('context:stream-end');
-    }
-
-    const isReady = fullResponse.includes('CONTEXT_READY');
-    let proposedContent = null;
-    if (isReady) {
-      const mdMatch = fullResponse.match(/```markdown\n([\s\S]*?)```/);
-      if (mdMatch) proposedContent = mdMatch[1].trim();
-    }
-
-    return {
-      response: fullResponse.replace(/^CONTEXT_READY\n?/, ''),
       isReady,
       proposedContent,
     };
@@ -1264,7 +1143,6 @@ Check the current file content. If any fields contain placeholder text, ask abou
 
   // --- Rescue Mode ---
   ipcMain.handle('brief:rescue', async () => {
-    const { buildSystemPrompt, callEngine } = require('../src/orchestrator');
     const goals = await db.getActiveGoals();
     if (goals.length === 0) return null;
 
@@ -1290,7 +1168,6 @@ Be warm. Be brief. Under 1 minute to read. The user needs clarity, not more pres
 
   // --- Weekly Review ---
   ipcMain.handle('brief:weeklyReview', async (_, options) => {
-    const { buildSystemPrompt, callEngine } = require('../src/orchestrator');
     const goals = await db.getActiveGoals();
     if (goals.length === 0) return null;
 
@@ -1335,7 +1212,6 @@ Be honest. Reference specific sessions and actions. Under 3 minutes to read.`;
 
   // --- Preparation Mode ---
   ipcMain.handle('chat:prepare', async (_, eventDescription) => {
-    const { buildSystemPrompt, callEngine } = require('../src/orchestrator');
     const goals = await db.getActiveGoals();
     const systemPrompt = await buildSystemPrompt(goals);
 
@@ -1359,14 +1235,12 @@ Be specific to this event and this user. Reference their goals, experience, and 
 
   // --- User Model Regeneration ---
   ipcMain.handle('settings:regenerateUserModel', async () => {
-    const { runUserModelGeneration } = require('../src/processor');
     const model = await runUserModelGeneration();
     return { success: !!model, content: model };
   });
 
   // --- User Model Status ---
   ipcMain.handle('settings:getUserModelStatus', async () => {
-    const { readRuntimeJson } = require('../src/runtime');
     const settings = readRuntimeJson('settings.json', {});
     const model = await db.getLatestUserModel();
     return {
