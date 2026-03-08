@@ -1,4 +1,4 @@
-const { updateSession, saveEntry, saveAction, saveOverride, getOpenActions, getActiveGoals } = require('./db');
+const { updateSession, saveEntry, saveAction, saveOverride, getOpenActions, getActiveGoals, getCompletedActions, getRecentSessions, getPersistentEntries, saveDecision, getLatestUserModel, clearPreviousUserModels } = require('./db');
 const { callEngine } = require('./orchestrator');
 
 const EXTRACTION_RUBRIC = `Rules for extraction:
@@ -18,11 +18,12 @@ async function processSession(sessionId, conversationHistory, durationMinutes) {
   const goals = await getActiveGoals();
   const goalIds = goals.map((g) => `${g.id}: ${g.title}`).join(', ');
 
-  // Run summary, entry extraction, and action extraction in parallel
-  const [summary, rawEntries, rawActions] = await Promise.all([
+  // Run summary, entry extraction, action extraction, and decision extraction in parallel
+  const [summary, rawEntries, rawActions, rawDecisions] = await Promise.all([
     extractSummary(transcript),
     extractEntries(transcript, goalIds),
     extractActions(transcript, goalIds),
+    extractDecisions(transcript, goalIds),
   ]);
 
   // Save session summary
@@ -98,7 +99,26 @@ async function processSession(sessionId, conversationHistory, durationMinutes) {
     }
   }
 
-  return { entries: entryCount, actions: actionCount };
+  // Save decisions
+  let decisionCount = 0;
+  for (const decision of rawDecisions) {
+    try {
+      await saveDecision({
+        session_id: sessionId,
+        goal_id: decision.goal_id || null,
+        description: decision.description,
+        alternatives: decision.alternatives || null,
+        expected_outcome: decision.expected_outcome || null,
+        atlas_confidence: decision.atlas_confidence || null,
+        follow_up_date: decision.follow_up_date || null,
+      });
+      decisionCount++;
+    } catch (err) {
+      console.error(`  Warning: failed to save decision: ${err.message}`);
+    }
+  }
+
+  return { entries: entryCount, actions: actionCount, decisions: decisionCount };
 }
 
 async function extractSummary(transcript) {
@@ -227,4 +247,183 @@ async function filterDuplicateActions(newActions, existingActions) {
   });
 }
 
-module.exports = { processSession };
+async function extractDecisions(transcript, goalIds) {
+  const prompt = `Review this conversation and extract any significant decisions that were made or confirmed. A decision is different from an action — it is a choice between alternatives that affects strategy.
+
+For each decision, return a JSON array with:
+- "description": what was decided
+- "alternatives": what other options were considered (or "none discussed")
+- "expected_outcome": what the user/Atlas expects to happen as a result
+- "atlas_confidence": "high", "medium", or "low"
+- "goal_id": relevant goal ID from [${goalIds}], or null
+- "follow_up_date": YYYY-MM-DD — when to check how this decision played out (typically 1-4 weeks)
+
+Only extract genuine decisions, not routine actions. "Applied to 3 jobs" is an action. "Decided to focus on React roles over full-stack" is a decision.
+
+${EXTRACTION_RUBRIC}
+
+Return ONLY a valid JSON array.
+
+${transcript}`;
+
+  try {
+    const result = await callEngine(prompt, 'You extract strategic decisions from conversations. Output only valid JSON arrays.');
+    const match = result.match(/\[[\s\S]*\]/);
+    if (!match) return [];
+    return JSON.parse(match[0]);
+  } catch {
+    return [];
+  }
+}
+
+async function generateUserModel(recentSessions, persistentEntries, existingModel) {
+  const sessionContext = recentSessions
+    .filter(s => s.summary)
+    .map(s => `[${s.date}] ${s.summary}`)
+    .join('\n');
+
+  const patternEntries = persistentEntries
+    .filter(e => ['pattern', 'override', 'breakthrough', 'insight'].includes(e.entry_type))
+    .map(e => `[${e.entry_type}] ${e.content}`)
+    .join('\n');
+
+  const prompt = `Based on the following session history and persistent observations, generate a concise user model. This is Atlas's private working understanding of the user — it will be loaded into every future session to improve advice quality.
+
+Recent sessions:
+${sessionContext}
+
+Persistent observations:
+${patternEntries}
+
+${existingModel ? `Previous user model:\n${existingModel}\n\nUpdate this model based on new evidence. Preserve what is still true. Revise what has changed. Add new observations.` : 'This is the first user model. Build it from what you can observe.'}
+
+Generate a model covering:
+1. **Decision-making style** — how they approach choices, what they tend to over/underweight
+2. **Recurring patterns** — what behaviours repeat across sessions (positive and negative)
+3. **What advice lands** — what kind of recommendations they actually act on vs resist
+4. **Blind spots** — what they consistently miss or avoid
+5. **Motivation drivers** — what genuinely moves them to action
+6. **Working relationship** — what works best when advising this person (directness level, detail level, push vs support)
+
+Keep it under 300 words. Be specific and evidence-based — reference actual events and patterns, not generic observations. Write in third person. This is a private advisory document, not a message to the user.`;
+
+  return await callEngine(prompt, 'You synthesise behavioural observations into a concise user model. Output only the model text.');
+}
+
+async function runUserModelGeneration() {
+  try {
+    const recentSessions = await getRecentSessions(30);
+    const persistentEntries = await getPersistentEntries();
+    const existing = await getLatestUserModel();
+    const existingContent = existing ? existing.content : null;
+
+    const model = await generateUserModel(recentSessions, persistentEntries, existingContent);
+    if (!model || model.length < 50) return null;
+
+    // Demote previous models
+    await clearPreviousUserModels();
+
+    // Save new model
+    await saveEntry({
+      session_id: null,
+      goal_id: null,
+      domain: 'meta',
+      entry_type: 'user_model',
+      content: model,
+      importance: 5,
+      is_persistent: true,
+      source: 'system',
+      tags: ['user-model'],
+    });
+
+    return model;
+  } catch (err) {
+    console.error('[UserModel] Generation failed:', err.message);
+    return null;
+  }
+}
+
+async function detectPatterns(recentSessions, openActions, completedActions, entries) {
+  const sessionSummaries = recentSessions
+    .filter(s => s.summary)
+    .map(s => `[${s.date}] ${s.summary}`)
+    .join('\n');
+
+  const actionHistory = [...openActions, ...completedActions]
+    .map(a => `[${a.status}] ${a.description} ${a.due_date ? '(due: ' + a.due_date + ')' : ''} ${a.follow_up_count > 0 ? '[' + a.follow_up_count + 'x follow-up]' : ''}`)
+    .join('\n');
+
+  const prompt = `Analyse this user's recent behaviour for patterns. Look across sessions and actions, not just individual events.
+
+Sessions (last 30 days):
+${sessionSummaries}
+
+Actions:
+${actionHistory}
+
+Look for:
+- Commitment slippage patterns (do they consistently defer certain types of actions?)
+- Energy/productivity patterns (any day-of-week or time patterns visible?)
+- Avoidance patterns (what topics or actions keep getting dodged?)
+- Over-planning vs under-executing
+- Goals that are declared but behaviourally abandoned
+- Positive patterns worth reinforcing
+
+Return a JSON array of patterns found. Each item:
+- "pattern": concise description
+- "evidence": what data supports this
+- "frequency": "one-off" | "recurring" | "persistent"
+- "type": "positive" | "risk" | "avoidance" | "drift"
+- "importance": 3-5
+
+Only include patterns with real evidence. Do not speculate. If no clear patterns exist, return an empty array.
+
+Return ONLY a valid JSON array.`;
+
+  try {
+    const result = await callEngine(prompt, 'You analyse behavioural patterns from session and action data. Output only valid JSON.');
+    const match = result.match(/\[[\s\S]*\]/);
+    if (!match) return [];
+    return JSON.parse(match[0]);
+  } catch {
+    return [];
+  }
+}
+
+async function runPatternDetection() {
+  try {
+    const recentSessions = await getRecentSessions(30);
+    const openActions = await getOpenActions();
+    const completedActions = await getCompletedActions();
+    const entries = await getPersistentEntries();
+
+    const patterns = await detectPatterns(recentSessions, openActions, completedActions, entries);
+
+    let saved = 0;
+    for (const p of patterns) {
+      try {
+        await saveEntry({
+          session_id: null,
+          goal_id: null,
+          domain: 'meta',
+          entry_type: 'pattern',
+          content: `[${p.type}] ${p.pattern} — Evidence: ${p.evidence}`,
+          importance: p.importance || 4,
+          is_persistent: true,
+          source: 'system',
+          tags: ['pattern-detection', p.type, p.frequency],
+        });
+        saved++;
+      } catch (err) {
+        console.error('[Patterns] Failed to save pattern:', err.message);
+      }
+    }
+
+    return { detected: patterns.length, saved };
+  } catch (err) {
+    console.error('[Patterns] Detection failed:', err.message);
+    return { detected: 0, saved: 0 };
+  }
+}
+
+module.exports = { processSession, extractDecisions, generateUserModel, runUserModelGeneration, detectPatterns, runPatternDetection };

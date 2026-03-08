@@ -264,7 +264,7 @@ async function getPersistentEntries() {
   return data;
 }
 
-async function cleanupOldEntries(days = 7) {
+async function cleanupOldEntries(days = 30) {
   const db = getClient();
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - days);
@@ -404,6 +404,7 @@ async function getFiles() {
 async function resetAllData() {
   const db = getClient();
   const tableConfigs = [
+    { table: 'decisions', dateCol: 'created_at' },
     { table: 'entries', dateCol: 'created_at' },
     { table: 'actions', dateCol: 'created_at' },
     { table: 'overrides', dateCol: 'created_at' },
@@ -413,12 +414,21 @@ async function resetAllData() {
   ];
 
   for (const { table, dateCol } of tableConfigs) {
-    const { error } = await db
-      .from(table)
-      .delete()
-      .gte(dateCol, '1970-01-01T00:00:00Z');
+    try {
+      const { error } = await db
+        .from(table)
+        .delete()
+        .gte(dateCol, '1970-01-01T00:00:00Z');
 
-    if (error) throw new Error(`Failed to clear ${table}: ${error.message}`);
+      if (error) throw error;
+    } catch (err) {
+      // Skip tables that don't exist yet (e.g. decisions before migration)
+      if (err.code === '42P01' || (err.message && err.message.includes('does not exist'))) {
+        console.warn(`[Reset] Skipping ${table}: table not found`);
+      } else {
+        throw new Error(`Failed to clear ${table}: ${err.message}`);
+      }
+    }
   }
 }
 
@@ -497,6 +507,72 @@ async function deleteAllSessions() {
   if (error) throw error;
 }
 
+// --- Decisions ---
+
+async function saveDecision(decision) {
+  const db = getClient();
+  const { data, error } = await db.from('decisions').insert(decision).select().single();
+  if (error) throw error;
+  return data;
+}
+
+async function getPendingDecisionFollowups() {
+  const db = getClient();
+  const today = new Date().toISOString().split('T')[0];
+  const { data, error } = await db
+    .from('decisions')
+    .select('*')
+    .lte('follow_up_date', today)
+    .is('actual_outcome', null)
+    .order('follow_up_date', { ascending: true });
+
+  if (error) throw error;
+  return data;
+}
+
+async function getAllDecisions() {
+  const db = getClient();
+  const { data, error } = await db
+    .from('decisions')
+    .select('*')
+    .order('created_at', { ascending: false });
+
+  if (error) throw error;
+  return data;
+}
+
+async function updateDecision(id, updates) {
+  const db = getClient();
+  const { error } = await db.from('decisions').update(updates).eq('id', id);
+  if (error) throw error;
+}
+
+// --- User Model ---
+
+async function getLatestUserModel() {
+  const db = getClient();
+  const { data, error } = await db
+    .from('entries')
+    .select('*')
+    .eq('entry_type', 'user_model')
+    .order('created_at', { ascending: false })
+    .limit(1);
+
+  if (error) throw error;
+  return data && data.length > 0 ? data[0] : null;
+}
+
+async function clearPreviousUserModels() {
+  const db = getClient();
+  const { error } = await db
+    .from('entries')
+    .update({ importance: 3, is_persistent: false })
+    .eq('entry_type', 'user_model')
+    .gte('importance', 4);
+
+  if (error) throw error;
+}
+
 module.exports = {
   initDB, getClient,
   saveGoal, getActiveGoals, getGoal, updateGoalStatus, getAllGoals, archiveGoal, unarchiveGoal, getArchivedGoals, countGoalLinkedItems, deleteGoalCascade,
@@ -506,4 +582,6 @@ module.exports = {
   getEntriesBySession,
   saveOverride, getUnresolvedOverrides, updateOverride, getAllOverrides,
   saveFile, getFiles, resetAllData, searchEntries,
+  saveDecision, getPendingDecisionFollowups, getAllDecisions, updateDecision,
+  getLatestUserModel, clearPreviousUserModels,
 };

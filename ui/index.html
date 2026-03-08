@@ -78,6 +78,7 @@
           <div class="stat-label">Overdue</div>
         </div>
       </div>
+      <div id="alerts-banner" style="display:none;margin-bottom:16px"></div>
       <div id="health-status" class="health-status-bar" style="display:none;margin-bottom:16px"></div>
       <div id="today-calendar" style="display:none;margin-bottom:16px">
         <h2 style="font-size:16px;margin-bottom:12px">Today's Schedule</h2>
@@ -90,7 +91,12 @@
       <div style="margin-bottom:16px">
         <button class="btn btn-primary" id="btn-generate-brief">Generate Morning Brief</button>
         <button class="btn" id="btn-generate-reflection">End-of-Day Reflection</button>
+        <button class="btn" id="btn-weekly-review" style="display:none">Weekly Review</button>
         <button class="btn" id="btn-today-session" onclick="navigateTo('chat')">Start Session</button>
+      </div>
+      <div style="margin-bottom:16px">
+        <button class="btn" id="btn-rescue-mode" style="display:none">I'm overwhelmed — reset my day</button>
+        <button class="btn" id="btn-prepare-mode" style="display:none">Prepare for something</button>
       </div>
       <div class="card" id="brief-card" style="display:none">
         <div class="card-header">
@@ -118,6 +124,7 @@
           </div>
           <div class="btn-group">
             <button class="btn btn-primary" id="btn-chat-start">Start Session</button>
+            <button class="btn" id="btn-decision-mode">Think through a decision</button>
             <button class="btn btn-danger" id="btn-chat-end" style="display:none">End Session</button>
           </div>
         </div>
@@ -197,6 +204,7 @@
       <div class="tabs">
         <div class="tab active" data-tab="memory-context">User Context</div>
         <div class="tab" data-tab="memory-entries">Entries</div>
+        <div class="tab" data-tab="memory-decisions">Decisions</div>
         <div class="tab" data-tab="memory-overrides">Overrides</div>
       </div>
       <div id="memory-context" class="tab-content active"></div>
@@ -225,6 +233,7 @@
         </div>
         <div id="entries-list-container"></div>
       </div>
+      <div id="memory-decisions" class="tab-content" style="display:none"></div>
       <div id="memory-overrides" class="tab-content" style="display:none"></div>
     </div>
 

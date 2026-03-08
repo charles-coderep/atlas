@@ -45,7 +45,7 @@ app.whenReady().then(async () => {
   try {
     await db.initDB();
     try {
-      const deletedEntries = await db.cleanupOldEntries(7);
+      const deletedEntries = await db.cleanupOldEntries(30);
       const deletedSessions = await db.cleanupEmptySessions(30);
       if (deletedEntries > 0 || deletedSessions > 0) {
         console.log(`[Cleanup] Removed ${deletedEntries} expired entries, ${deletedSessions} empty sessions`);
@@ -245,6 +245,16 @@ Gather information through conversation. When you have enough, start your respon
     ];
     if (sourcePolicy.calendar && filteredOptions.calendarData) sections.push('**Schedule Awareness** - today\'s events and conflicts.');
     if (sourcePolicy.gmail && filteredOptions.emailData) sections.push('**Email Highlights** - goal-relevant emails requiring action.');
+    // Goal health assessment for goals active 14+ days
+    const matureGoals = goals.filter(g => {
+      if (!g.created_at) return false;
+      const daysActive = Math.floor((Date.now() - new Date(g.created_at).getTime()) / 86400000);
+      return daysActive >= 14;
+    });
+    if (matureGoals.length > 0) {
+      sections.push(`**Goal Health** - For each goal active 14+ days (${matureGoals.map(g => g.title).join(', ')}): momentum (moving/stalled/drifting), clarity (well-defined/needs sharpening), risk (low/medium/high). One sentence each on what would most improve trajectory.`);
+    }
+
     sections.push('**Recommended Focus** - clear directive on where to spend time and energy today.');
 
     const numberedSections = sections.map((s, i) => `${i + 1}. ${s}`).join('\n');
@@ -326,6 +336,19 @@ Keep it scannable. Under 3 minutes to read. Reference specific past events and c
 
     if (contextWarnings.length > 0) {
       openerParts.push(`THIN CONTEXT: These user files still have placeholder content: ${contextWarnings.map(w => w.split(' â€” ')[0]).join(', ')}. Consider offering to fill them in.`);
+    }
+
+    // Decision follow-ups
+    try {
+      const pendingDecisions = await db.getPendingDecisionFollowups();
+      for (const d of pendingDecisions) {
+        openerParts.push(`DECISION FOLLOW-UP: On ${new Date(d.created_at).toLocaleDateString('en-GB')}, you decided “${d.description}”. Expected: ${d.expected_outcome || 'not specified'}. It's time to check: how did this play out?`);
+      }
+    } catch {}
+
+    // Decision mode
+    if (options && options.mode === 'decision') {
+      openerParts.push(`MODE: Decision rehearsal. The user wants to think through a major decision. Start by asking what decision they're facing, then work through: name it precisely, identify affected goals, generate options (including not acting), run a pre-mortem, check opportunity cost, check second-order effects, and present your recommendation with confidence level. Work through one step at a time.`);
     }
 
     const openerPrompt = `You are starting a new advisory session. Generate a specific, grounded opening. 2-4 sentences max. Reference what you actually know â€” overdue items, recent sessions, active goals, today's date. Feel like you've been thinking about the user between sessions. Never be generic. Never introduce yourself.
@@ -430,7 +453,7 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
 
     const duration = chatSession ? Math.round((Date.now() - new Date(chatSession.created_at).getTime()) / 60000) : 0;
 
-    let result = { entries: 0, actions: 0 };
+    let result = { entries: 0, actions: 0, decisions: 0 };
     try {
       if (chatHistory.length >= 4) {
         if (mainWindow && !mainWindow.isDestroyed()) {
@@ -438,6 +461,24 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
         }
         const { processSession } = require('../src/processor');
         result = await processSession(chatSession.id, chatHistory, duration);
+
+        // Check if user model / pattern detection should run (every 5 sessions)
+        try {
+          const { readRuntimeJson, writeRuntimeJson } = require('../src/runtime');
+          const settings = readRuntimeJson('settings.json', {});
+          const count = (settings.sessionsSinceLastUserModel || 0) + 1;
+          if (count >= 5) {
+            writeRuntimeJson('settings.json', { ...settings, sessionsSinceLastUserModel: 0 });
+            const { runUserModelGeneration, runPatternDetection } = require('../src/processor');
+            // Run in background — don't block session end
+            runUserModelGeneration().then(m => { if (m) console.log('[UserModel] Regenerated'); });
+            runPatternDetection().then(r => console.log(`[Patterns] Detected ${r.detected}, saved ${r.saved}`));
+          } else {
+            writeRuntimeJson('settings.json', { ...settings, sessionsSinceLastUserModel: count });
+          }
+        } catch (bgErr) {
+          console.error('[Background tasks]', bgErr.message);
+        }
       } else {
         await db.updateSession(chatSession.id, { duration_minutes: duration });
       }
@@ -681,20 +722,29 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
       .map((s) => `- ${s.summary}`)
       .join('\n') || 'No sessions today.';
 
-    const reflectionPrompt = `Generate an end-of-day reflection. Today's date: ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}.
+    const completedActions = await db.getCompletedActions();
+    const completedToday = completedActions.filter(a => {
+      if (!a.completed_at) return false;
+      return new Date(a.completed_at).toISOString().split('T')[0] === new Date().toISOString().split('T')[0];
+    });
+
+    const today = new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+
+    const reflectionPrompt = `Generate an end-of-day reflection. Today is ${today}.
 
 Today's sessions:
 ${sessionSummaries}
 
 Open actions: ${openActions.length} (${overdueActions.length} overdue)
+Completed today: ${completedToday.length}
 
-Generate a brief, honest reflection covering:
-1. **What moved forward today** â€” concrete progress on goals
-2. **What didn't happen** â€” planned items that were skipped or avoided
-3. **Pattern check** â€” any drift, avoidance, or procrastination patterns
-4. **Tomorrow's priority** â€” the single most important thing to do first
+Structure your reflection as:
+1. **What moved forward** — concrete progress, be specific
+2. **What didn't happen** — planned items that were skipped, with honest assessment of why
+3. **Pattern check** — any drift, avoidance, or energy patterns you notice
+4. **Carry forward** — the single most important thing to do first tomorrow, and why
 
-Be direct. Under 2 minutes to read. No fluff.`;
+Under 2 minutes to read. No fluff. Reference specific actions and sessions.`;
 
     return callEngine(reflectionPrompt, systemPrompt);
   });
@@ -1136,6 +1186,181 @@ Check the current file content. If any fields contain placeholder text, ask abou
       response: fullResponse.replace(/^CONTEXT_READY\n?/, ''),
       isReady,
       proposedContent,
+    };
+  });
+
+  // --- Decisions ---
+  ipcMain.handle('decisions:save', (_, decision) => db.saveDecision(decision));
+  ipcMain.handle('decisions:getPending', () => db.getPendingDecisionFollowups());
+  ipcMain.handle('decisions:getAll', () => db.getAllDecisions());
+  ipcMain.handle('decisions:update', (_, id, updates) => db.updateDecision(id, updates));
+
+  // --- Alerts ---
+  ipcMain.handle('atlas:getAlerts', async () => {
+    const alerts = [];
+
+    // Overdue actions
+    const overdue = await db.getOverdueActions();
+    if (overdue.length > 0) {
+      alerts.push({
+        type: 'overdue',
+        priority: 'high',
+        message: `${overdue.length} overdue action${overdue.length !== 1 ? 's' : ''} need attention`,
+        detail: overdue.map(a => a.description).join(', '),
+      });
+    }
+
+    // Decision follow-ups due
+    try {
+      const pendingDecisions = await db.getPendingDecisionFollowups();
+      if (pendingDecisions.length > 0) {
+        alerts.push({
+          type: 'decision_followup',
+          priority: 'medium',
+          message: `${pendingDecisions.length} decision${pendingDecisions.length !== 1 ? 's' : ''} ready for outcome review`,
+        });
+      }
+    } catch {}
+
+    // Stalled actions (followed up 3+ times)
+    const openActions = await db.getOpenActions();
+    const stalled = openActions.filter(a => a.follow_up_count >= 3);
+    if (stalled.length > 0) {
+      alerts.push({
+        type: 'stalled',
+        priority: 'medium',
+        message: `${stalled.length} action${stalled.length !== 1 ? 's' : ''} stalled after repeated follow-ups`,
+      });
+    }
+
+    // No sessions in 3+ days
+    const recentSessions = await db.getRecentSessions(3);
+    const sessionsWithSummary = recentSessions.filter(s => s.summary);
+    if (sessionsWithSummary.length === 0) {
+      const goals = await db.getActiveGoals();
+      if (goals.length > 0) {
+        alerts.push({
+          type: 'inactive',
+          priority: 'low',
+          message: 'No sessions in the last 3 days. Your goals are still waiting.',
+        });
+      }
+    }
+
+    return alerts;
+  });
+
+  // --- Rescue Mode ---
+  ipcMain.handle('brief:rescue', async () => {
+    const { buildSystemPrompt, callEngine } = require('../src/orchestrator');
+    const goals = await db.getActiveGoals();
+    if (goals.length === 0) return null;
+
+    const systemPrompt = await buildSystemPrompt(goals);
+    const openActions = await db.getOpenActions();
+    const overdueActions = await db.getOverdueActions();
+
+    const rescuePrompt = `The user is overwhelmed and needs a reset. Do not challenge, do not follow up on overdue items, do not discuss what went wrong. Just stabilise.
+
+Open actions: ${openActions.length} (${overdueActions.length} overdue)
+Active goals: ${goals.map(g => g.title).join(', ')}
+
+Produce exactly this, nothing more:
+1. **The one thing that matters today** — the single highest-leverage action
+2. **What can wait** — everything else, with permission to ignore it today
+3. **Your next 30 minutes** — exactly what to do right now, step by step
+4. **Stop doing this** — one thing to drop or pause immediately
+
+Be warm. Be brief. Under 1 minute to read. The user needs clarity, not more pressure.`;
+
+    return callEngine(rescuePrompt, systemPrompt);
+  });
+
+  // --- Weekly Review ---
+  ipcMain.handle('brief:weeklyReview', async (_, options) => {
+    const { buildSystemPrompt, callEngine } = require('../src/orchestrator');
+    const goals = await db.getActiveGoals();
+    if (goals.length === 0) return null;
+
+    const systemPrompt = await buildSystemPrompt(goals, options || {});
+    const weekSessions = await db.getRecentSessions(7);
+    const openActions = await db.getOpenActions();
+    const overdueActions = await db.getOverdueActions();
+    const completedActions = await db.getCompletedActions();
+    const weekCompletions = completedActions.filter(a => {
+      if (!a.completed_at) return false;
+      const d = new Date(a.completed_at);
+      const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7);
+      return d >= weekAgo;
+    });
+
+    const sessionSummaries = weekSessions
+      .filter(s => s.summary)
+      .map(s => `- [${s.date}] ${s.summary}`)
+      .join('\n') || 'No sessions this week.';
+
+    const reviewPrompt = `Generate a weekly strategic review. This week: ${new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}.
+
+This week's sessions (${weekSessions.length}):
+${sessionSummaries}
+
+Actions completed this week: ${weekCompletions.length}
+Currently open: ${openActions.length} (${overdueActions.length} overdue)
+
+Active goals: ${goals.map(g => g.title).join(', ')}
+
+Structure your review as:
+1. **Week in review** — what actually happened across all goals, 3-5 sentences
+2. **Momentum check** — which goals gained ground, which stalled, which drifted
+3. **Patterns this week** — recurring behaviours, positive or negative
+4. **Goal health** — should any goal be protected harder, paused, revised, or dropped?
+5. **Next week's focus** — the 2-3 things that would make next week count
+
+Be honest. Reference specific sessions and actions. Under 3 minutes to read.`;
+
+    return callEngine(reviewPrompt, systemPrompt);
+  });
+
+  // --- Preparation Mode ---
+  ipcMain.handle('chat:prepare', async (_, eventDescription) => {
+    const { buildSystemPrompt, callEngine } = require('../src/orchestrator');
+    const goals = await db.getActiveGoals();
+    const systemPrompt = await buildSystemPrompt(goals);
+
+    const prepPrompt = `The user has a high-stakes event coming up and needs thorough preparation.
+
+Event: ${eventDescription}
+
+Produce a structured preparation brief:
+1. **Event overview** — what this is and why it matters to the active goals
+2. **Research** — what you know or can find about the other party, context, and environment. Use [SEARCH: query] if you need current information.
+3. **Positioning** — how to frame the user's background and strengths for this specific event
+4. **Likely questions or challenges** — what to expect and how to handle each
+5. **Questions to ask** — what the user should ask to demonstrate engagement and gather information
+6. **Risks and preparation gaps** — what could go wrong and how to mitigate it
+7. **One-page summary** — the key points to remember, scannable in 2 minutes
+
+Be specific to this event and this user. Reference their goals, experience, and situation. Generic advice is worthless here.`;
+
+    return callEngine(prepPrompt, systemPrompt);
+  });
+
+  // --- User Model Regeneration ---
+  ipcMain.handle('settings:regenerateUserModel', async () => {
+    const { runUserModelGeneration } = require('../src/processor');
+    const model = await runUserModelGeneration();
+    return { success: !!model, content: model };
+  });
+
+  // --- User Model Status ---
+  ipcMain.handle('settings:getUserModelStatus', async () => {
+    const { readRuntimeJson } = require('../src/runtime');
+    const settings = readRuntimeJson('settings.json', {});
+    const model = await db.getLatestUserModel();
+    return {
+      exists: !!model,
+      lastGenerated: model ? model.created_at : null,
+      sessionsSinceRegeneration: settings.sessionsSinceLastUserModel || 0,
     };
   });
 }

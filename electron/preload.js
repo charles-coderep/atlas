@@ -65,6 +65,21 @@ contextBridge.exposeInMainWorld('atlas', {
   brief: {
     generate: (options) => ipcRenderer.invoke('brief:generate', options),
     reflection: (options) => ipcRenderer.invoke('brief:reflection', options),
+    rescue: () => ipcRenderer.invoke('brief:rescue'),
+    weeklyReview: (options) => ipcRenderer.invoke('brief:weeklyReview', options),
+  },
+
+  // Decisions
+  decisions: {
+    save: (d) => ipcRenderer.invoke('decisions:save', d),
+    getPending: () => ipcRenderer.invoke('decisions:getPending'),
+    getAll: () => ipcRenderer.invoke('decisions:getAll'),
+    update: (id, u) => ipcRenderer.invoke('decisions:update', id, u),
+  },
+
+  // Alerts
+  alerts: {
+    get: () => ipcRenderer.invoke('atlas:getAlerts'),
   },
 
   // Chat
@@ -73,6 +88,7 @@ contextBridge.exposeInMainWorld('atlas', {
     send: (message) => ipcRenderer.invoke('chat:send', message),
     sendStreaming: (message) => ipcRenderer.invoke('chat:sendStreaming', message),
     end: () => ipcRenderer.invoke('chat:end'),
+    prepare: (desc) => ipcRenderer.invoke('chat:prepare', desc),
     onProcessingStatus: (callback) => ipcRenderer.on('chat:processing-status', (_, status) => callback(status)),
     onStreamChunk: (callback) => ipcRenderer.on('chat:stream-chunk', (_, chunk) => callback(chunk)),
     onStreamEnd: (callback) => ipcRenderer.on('chat:stream-end', () => callback()),
@@ -144,6 +160,8 @@ contextBridge.exposeInMainWorld('atlas', {
     getTones: () => ipcRenderer.invoke('settings:getTones'),
     setTone: (name) => ipcRenderer.invoke('settings:setTone', name),
     resetAll: () => ipcRenderer.invoke('settings:resetAll'),
+    regenerateUserModel: () => ipcRenderer.invoke('settings:regenerateUserModel'),
+    getUserModelStatus: () => ipcRenderer.invoke('settings:getUserModelStatus'),
   },
 
   // Health

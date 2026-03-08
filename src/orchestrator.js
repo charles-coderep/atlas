@@ -416,14 +416,18 @@ async function buildSystemPrompt(goals, options = {}) {
     ? goals.map((g) => JSON.stringify(g.goal_data, null, 2)).join('\n\n')
     : 'No goals defined yet.';
 
-  const [recentSessions, openActions, overdueActions, persistentEntries, recentEntries] =
+  const { getLatestUserModel } = require('./db');
+  const [recentSessions, openActions, overdueActions, persistentEntries, recentEntries, userModelEntry] =
     await Promise.all([
       getRecentSessions(7),
       getOpenActions(),
       getOverdueActions(),
       getPersistentEntries(),
       getRecentEntries(7),
+      getLatestUserModel().catch(() => null),
     ]);
+
+  const userModel = userModelEntry ? userModelEntry.content : null;
 
   // Goal-aware source filtering
   const sourcePolicy = getGoalSourcePolicy(goals);
@@ -472,6 +476,7 @@ ${userCtx.situation}
 
 ## User Preferences [user-maintained]
 ${userCtx.preferences}
+${userModel ? `\n## Working Model of This User [auto-generated]\n${userModel}` : ''}
 
 ## Active Goals [user-maintained]
 ${goalsBlock}

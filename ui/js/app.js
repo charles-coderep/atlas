@@ -199,10 +199,36 @@ async function loadToday() {
     badge.style.display = 'none';
   }
 
+  // Show/hide rescue and prepare buttons based on goal state
+  const rescueBtn = document.getElementById('btn-rescue-mode');
+  const prepareBtn = document.getElementById('btn-prepare-mode');
+  if (goals.length > 0) {
+    rescueBtn.style.display = '';
+    prepareBtn.style.display = '';
+  } else {
+    rescueBtn.style.display = 'none';
+    prepareBtn.style.display = 'none';
+  }
+
+  // Weekly review button — prominent on Sundays and Mondays
+  const weeklyBtn = document.getElementById('btn-weekly-review');
+  const dayOfWeek = new Date().getDay();
+  if (goals.length > 0) {
+    weeklyBtn.style.display = '';
+    if (dayOfWeek === 0 || dayOfWeek === 1) {
+      weeklyBtn.className = 'btn btn-primary';
+    } else {
+      weeklyBtn.className = 'btn btn-sm';
+    }
+  } else {
+    weeklyBtn.style.display = 'none';
+  }
+
   renderCalendarPanel();
   renderContextSummary();
   updateSourceStatuses();
   updateReflectionButton();
+  loadAlerts();
 }
 
 async function updateReflectionButton() {
@@ -350,7 +376,9 @@ document.getElementById('btn-chat-end').addEventListener('click', async () => {
   try {
     const result = await atlas.chat.end();
     if (result) {
-      appendChatMessage('chat-messages', 'system', `Session ended. ${result.entries} entries extracted, ${result.actions} action items tracked.`);
+      const parts = [`${result.entries} entries extracted`, `${result.actions} action items tracked`];
+      if (result.decisions > 0) parts.push(`${result.decisions} decisions journaled`);
+      appendChatMessage('chat-messages', 'system', `Session ended. ${parts.join(', ')}.`);
     }
   } catch {}
 
@@ -358,6 +386,8 @@ document.getElementById('btn-chat-end').addEventListener('click', async () => {
   lastChatRole = null;
   document.getElementById('btn-chat-start').style.display = 'inline-flex';
   document.getElementById('btn-chat-start').disabled = false;
+  document.getElementById('btn-decision-mode').style.display = '';
+  document.getElementById('btn-decision-mode').disabled = false;
   document.getElementById('btn-chat-end').style.display = 'none';
   document.getElementById('btn-chat-end').disabled = false;
   document.getElementById('chat-input-bar').style.display = 'none';
@@ -1151,6 +1181,7 @@ async function loadMemory() {
   switch (activeTab.dataset.tab) {
     case 'memory-context': return loadMemoryContext();
     case 'memory-entries': return loadMemoryEntries();
+    case 'memory-decisions': return loadMemoryDecisions();
     case 'memory-overrides': return loadMemoryOverrides();
   }
 }
@@ -1580,6 +1611,91 @@ async function calibrateOverride(id, outcome) {
   }
 }
 
+// === DECISIONS ===
+
+async function loadMemoryDecisions() {
+  const container = document.getElementById('memory-decisions');
+  let decisions;
+  try {
+    decisions = await atlas.decisions.getAll();
+  } catch {
+    container.innerHTML = '<div class="empty-state"><p>Decisions table not available. Run the SQL migration first.</p></div>';
+    return;
+  }
+
+  if (!decisions || decisions.length === 0) {
+    container.innerHTML = '<div class="empty-state"><p>No decisions recorded yet. Decisions are extracted automatically from advisory sessions when you make strategic choices.</p></div>';
+    return;
+  }
+
+  const open = decisions.filter(d => !d.actual_outcome);
+  const resolved = decisions.filter(d => d.actual_outcome);
+
+  let html = '';
+
+  if (open.length > 0) {
+    html += '<h3 style="font-size:14px;margin-bottom:12px">Open Decisions</h3>';
+    html += open.map(d => `
+      <div class="card" style="border-left:3px solid var(--accent);margin-bottom:8px">
+        <div class="card-header">
+          <span class="card-title" style="font-size:13px">${escapeHtml(d.description)}</span>
+          <span class="card-meta">${new Date(d.created_at).toLocaleDateString()}</span>
+        </div>
+        <div class="card-body" style="font-size:13px">
+          ${d.alternatives ? `<div><strong>Alternatives:</strong> ${escapeHtml(d.alternatives)}</div>` : ''}
+          ${d.expected_outcome ? `<div><strong>Expected:</strong> ${escapeHtml(d.expected_outcome)}</div>` : ''}
+          ${d.atlas_confidence ? `<div><strong>Confidence:</strong> <span class="tag ${d.atlas_confidence === 'high' ? 'tag-success' : d.atlas_confidence === 'low' ? 'tag-danger' : 'tag-warning'}">${d.atlas_confidence}</span></div>` : ''}
+          ${d.follow_up_date ? `<div><strong>Follow up:</strong> ${d.follow_up_date}</div>` : ''}
+        </div>
+        <div class="btn-group" style="margin-top:8px">
+          <button class="btn btn-sm" onclick="resolveDecision('${d.id}')">Record Outcome</button>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  if (resolved.length > 0) {
+    // Decision quality stats
+    const withConfidence = resolved.filter(d => d.atlas_confidence);
+    if (withConfidence.length >= 10) {
+      html += '<h3 style="font-size:14px;margin:16px 0 8px">Decision Quality</h3>';
+      html += '<div style="font-size:13px;color:var(--text-secondary);margin-bottom:12px">Based on ' + withConfidence.length + ' resolved decisions with confidence ratings.</div>';
+    }
+
+    html += '<h3 style="font-size:14px;margin:16px 0 12px">Resolved Decisions</h3>';
+    html += resolved.map(d => `
+      <div class="list-item">
+        <div class="item-main">
+          <div class="item-title" style="font-size:13px">${escapeHtml(d.description)}</div>
+          <div class="item-subtitle">
+            ${d.atlas_confidence ? `<span class="tag ${d.atlas_confidence === 'high' ? 'tag-success' : d.atlas_confidence === 'low' ? 'tag-danger' : 'tag-warning'}">${d.atlas_confidence}</span>` : ''}
+            <span>${escapeHtml(d.actual_outcome || '')}</span>
+            <span style="margin-left:8px">${new Date(d.created_at).toLocaleDateString()}</span>
+          </div>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  container.innerHTML = html;
+}
+
+async function resolveDecision(id) {
+  const outcome = prompt('What actually happened? How did this decision play out?');
+  if (!outcome) return;
+  try {
+    await atlas.decisions.update(id, {
+      actual_outcome: outcome,
+      outcome_date: new Date().toISOString().split('T')[0],
+    });
+    showToast('Decision outcome recorded', 'success');
+    loadMemoryDecisions();
+  } catch (err) {
+    showToast(`Failed: ${err.message}`, 'error');
+  }
+}
+window.resolveDecision = resolveDecision;
+
 // === SESSIONS ===
 
 async function loadSessions() {
@@ -1992,9 +2108,10 @@ async function loadSettingsMethodology() {
 
 async function loadSettingsDiagnostics() {
   const container = document.getElementById('settings-diagnostics');
-  const [diag, methodology] = await Promise.all([
+  const [diag, methodology, userModelStatus] = await Promise.all([
     atlas.settings.getDiagnostics(),
     atlas.settings.getMethodology(),
+    atlas.settings.getUserModelStatus().catch(() => null),
   ]);
   if (!diag) {
     container.innerHTML = '<div class="empty-state"><p>No diagnostics yet. Diagnostics appear after Atlas assembles context for a brief or session.</p></div>';
@@ -2047,6 +2164,16 @@ async function loadSettingsDiagnostics() {
         ${methodology && methodology.loaded
           ? `<div style="font-size:13px"><span class="tag tag-success">Loaded</span> ~${methodology.tokens} tokens <span style="color:var(--text-secondary)">${escapeHtml(methodology.filePath || '')}</span></div>`
           : '<div style="font-size:13px"><span class="tag tag-warning">Not loaded</span> No methodology file found</div>'}
+        <h3 style="font-size:14px;margin:12px 0 8px">User Model</h3>
+        ${userModelStatus ? `
+          <div style="font-size:13px">
+            ${userModelStatus.exists
+              ? `<span class="tag tag-success">Active</span> Last generated: ${new Date(userModelStatus.lastGenerated).toLocaleDateString()}`
+              : '<span class="tag tag-secondary">Not yet generated</span>'}
+            <span style="margin-left:8px;color:var(--text-secondary)">${userModelStatus.sessionsSinceRegeneration}/5 sessions until next regeneration</span>
+          </div>
+          <button class="btn btn-sm" style="margin-top:8px" onclick="regenerateUserModel()">Regenerate Now</button>
+        ` : '<div style="font-size:13px;color:var(--text-secondary)">Not available</div>'}
       </div>
     </div>
   `;
@@ -2829,6 +2956,184 @@ async function init() {
 
 init();
 
+
+// === USER MODEL ===
+
+async function regenerateUserModel() {
+  showToast('Regenerating user model...', 'info');
+  try {
+    const result = await atlas.settings.regenerateUserModel();
+    if (result.success) {
+      showToast('User model regenerated', 'success');
+      loadSettingsDiagnostics();
+    } else {
+      showToast('Not enough data to generate user model', 'info');
+    }
+  } catch (err) {
+    showToast(`Failed: ${err.message}`, 'error');
+  }
+}
+window.regenerateUserModel = regenerateUserModel;
+
+// === ALERTS ===
+
+async function loadAlerts() {
+  const banner = document.getElementById('alerts-banner');
+  try {
+    const alerts = await atlas.alerts.get();
+    if (!alerts || alerts.length === 0) {
+      banner.style.display = 'none';
+      return;
+    }
+
+    const priorityColors = { high: 'var(--warning)', medium: 'var(--accent)', low: 'var(--text-muted)' };
+    banner.style.display = 'block';
+    banner.innerHTML = alerts.map(a => `
+      <div style="padding:8px 12px;margin-bottom:4px;border-left:3px solid ${priorityColors[a.priority] || 'var(--border)'};background:var(--bg-secondary);border-radius:4px;font-size:13px">
+        ${escapeHtml(a.message)}
+        ${a.detail ? `<div style="font-size:12px;color:var(--text-muted);margin-top:2px">${escapeHtml(a.detail)}</div>` : ''}
+      </div>
+    `).join('');
+  } catch {
+    banner.style.display = 'none';
+  }
+}
+
+// === RESCUE MODE ===
+
+document.getElementById('btn-rescue-mode').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-rescue-mode');
+  const briefCard = document.getElementById('brief-card');
+  const briefContent = document.getElementById('brief-content');
+  const loading = document.getElementById('today-loading');
+
+  btn.disabled = true;
+  loading.style.display = 'flex';
+  loading.querySelector('.spinner').nextSibling.textContent = ' Generating recovery plan...';
+
+  try {
+    const result = await atlas.brief.rescue();
+    if (result) {
+      document.querySelector('#brief-card .card-title').textContent = 'Recovery Plan';
+      briefContent.innerHTML = renderMarkdown(result);
+      briefCard.style.display = 'block';
+      briefCard.style.borderLeft = '3px solid var(--success)';
+    }
+  } catch (err) {
+    showToast(`Rescue mode failed: ${err.message}`, 'error');
+  }
+
+  loading.style.display = 'none';
+  btn.disabled = false;
+});
+
+// === WEEKLY REVIEW ===
+
+document.getElementById('btn-weekly-review').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-weekly-review');
+  const briefCard = document.getElementById('brief-card');
+  const briefContent = document.getElementById('brief-content');
+  const loading = document.getElementById('today-loading');
+
+  btn.disabled = true;
+  loading.style.display = 'flex';
+  loading.querySelector('.spinner').nextSibling.textContent = ' Generating weekly review...';
+
+  try {
+    const options = {};
+    if (cachedCalendarData) options.calendarData = cachedCalendarData;
+    if (cachedEmailData) options.emailData = cachedEmailData;
+
+    const result = await atlas.brief.weeklyReview(options);
+    if (result) {
+      document.querySelector('#brief-card .card-title').textContent = 'Weekly Review';
+      briefContent.innerHTML = renderMarkdown(result);
+      briefCard.style.display = 'block';
+      briefCard.style.borderLeft = '';
+    } else {
+      showToast('No active goals — create a goal first.', 'info');
+    }
+  } catch (err) {
+    showToast(`Weekly review failed: ${err.message}`, 'error');
+  }
+
+  loading.style.display = 'none';
+  btn.disabled = false;
+});
+
+// === PREPARATION MODE ===
+
+document.getElementById('btn-prepare-mode').addEventListener('click', async () => {
+  const desc = prompt('What are you preparing for? (e.g. "Interview with Company X on Thursday")');
+  if (!desc) return;
+
+  const briefCard = document.getElementById('brief-card');
+  const briefContent = document.getElementById('brief-content');
+  const loading = document.getElementById('today-loading');
+
+  loading.style.display = 'flex';
+  loading.querySelector('.spinner').nextSibling.textContent = ' Preparing brief...';
+
+  try {
+    const result = await atlas.chat.prepare(desc);
+    if (result) {
+      document.querySelector('#brief-card .card-title').textContent = 'Preparation Brief';
+      briefContent.innerHTML = renderMarkdown(result);
+      briefCard.style.display = 'block';
+      briefCard.style.borderLeft = '';
+    }
+  } catch (err) {
+    showToast(`Preparation failed: ${err.message}`, 'error');
+  }
+
+  loading.style.display = 'none';
+});
+
+// === DECISION MODE ===
+
+document.getElementById('btn-decision-mode').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-decision-mode');
+  const messages = document.getElementById('chat-messages');
+  let typingEl = null;
+
+  btn.disabled = true;
+  document.getElementById('chat-status').textContent = 'Starting decision rehearsal...';
+  messages.innerHTML = '';
+  lastChatRole = null;
+  typingEl = showTypingIndicator('chat-messages');
+
+  try {
+    const options = { mode: 'decision' };
+    if (cachedCalendarData) options.calendarData = cachedCalendarData;
+    if (cachedEmailData) options.emailData = cachedEmailData;
+
+    const result = await atlas.chat.start(options);
+    removeTypingIndicator(typingEl);
+
+    if (result.error) {
+      document.getElementById('chat-status').textContent = result.error;
+      btn.disabled = false;
+      return;
+    }
+
+    chatActive = true;
+    lastChatRole = null;
+    document.getElementById('chat-status').textContent = 'Decision rehearsal active';
+    document.getElementById('btn-chat-start').style.display = 'none';
+    btn.style.display = 'none';
+    document.getElementById('btn-chat-end').style.display = 'inline-flex';
+    document.getElementById('chat-input-bar').style.display = 'flex';
+
+    if (result.opening) {
+      appendChatMessage('chat-messages', 'atlas', result.opening);
+    }
+    document.getElementById('chat-input').focus();
+  } catch (err) {
+    removeTypingIndicator(typingEl);
+    document.getElementById('chat-status').textContent = `Error: ${err.message}`;
+    btn.disabled = false;
+  }
+});
 
 document.getElementById('agent-modal-save').addEventListener('click', async () => {
   const mode = document.getElementById('agent-modal-save').dataset.mode;
