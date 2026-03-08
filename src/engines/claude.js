@@ -23,7 +23,7 @@ class ClaudeEngine extends BaseEngine {
   async send(prompt, systemPrompt, options = {}) {
     return new Promise((resolve, reject) => {
       const args = this._buildArgs(systemPrompt, options);
-      const proc = spawn('claude', args, { env: this._env() });
+      const proc = spawn('claude', args, { env: this._env(), windowsHide: true });
 
       let stdout = '';
       let stderr = '';
@@ -51,7 +51,7 @@ class ClaudeEngine extends BaseEngine {
   async sendStreaming(prompt, systemPrompt, options = {}, onChunk) {
     return new Promise((resolve, reject) => {
       const args = this._buildArgs(systemPrompt, options);
-      const proc = spawn('claude', args, { env: this._env() });
+      const proc = spawn('claude', args, { env: this._env(), windowsHide: true });
 
       let fullOutput = '';
       let stderr = '';
@@ -83,7 +83,7 @@ class ClaudeEngine extends BaseEngine {
 
   async isAvailable() {
     try {
-      execSync('claude --version', { stdio: 'pipe', timeout: 5000 });
+      execSync('claude --version', { stdio: 'pipe', timeout: 5000, windowsHide: true });
       return true;
     } catch {
       return false;

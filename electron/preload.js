@@ -126,6 +126,11 @@ contextBridge.exposeInMainWorld('atlas', {
     setEngine: (name) => ipcRenderer.invoke('settings:setEngine', name),
   },
 
+  // Health
+  health: {
+    check: () => ipcRenderer.invoke('health:check'),
+  },
+
   // Export
   export: {
     pdf: (htmlContent, title) => ipcRenderer.invoke('export:pdf', htmlContent, title),

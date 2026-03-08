@@ -1,8 +1,15 @@
 const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 
-// Load .env before anything else
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+// Load .env — check app root first, then resources directory for packaged app
+const envPaths = [
+  path.join(__dirname, '..', '.env'),
+  path.join(process.resourcesPath || '', '.env'),
+];
+for (const p of envPaths) {
+  const result = require('dotenv').config({ path: p });
+  if (!result.error) break;
+}
 
 const db = require('../src/db');
 
@@ -28,6 +35,11 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  // Show window immediately so user sees something right away
+  createWindow();
+  registerIPC();
+
+  // Run startup checks in background
   try {
     await db.initDB();
   } catch (err) {
@@ -49,9 +61,6 @@ app.whenReady().then(async () => {
   } catch (err) {
     console.error('Goal migration error:', err.message);
   }
-
-  createWindow();
-  registerIPC();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -674,6 +683,51 @@ Be direct. Under 2 minutes to read. No fluff.`;
   ipcMain.handle('settings:isGoogleConfigured', () => {
     const { isGoogleConfigured } = require('../src/setup');
     return isGoogleConfigured();
+  });
+
+  // --- Health Check ---
+  ipcMain.handle('health:check', async () => {
+    const status = {
+      ai: { ok: false, label: 'not found' },
+      database: { ok: false, label: 'error' },
+      gmail: { ok: false, label: 'not set up' },
+      calendar: { ok: false, label: 'not set up' },
+      voice: { ok: false, label: 'model missing' },
+    };
+
+    // AI engine
+    try {
+      const { getEngine } = require('../src/orchestrator');
+      const engine = getEngine();
+      const available = await engine.isAvailable();
+      status.ai = available ? { ok: true, label: 'connected' } : { ok: false, label: 'not found' };
+    } catch { status.ai = { ok: false, label: 'not found' }; }
+
+    // Database
+    try {
+      const client = db.getClient();
+      const { error } = await client.from('goals').select('id').limit(1);
+      status.database = error ? { ok: false, label: 'error' } : { ok: true, label: 'connected' };
+    } catch { status.database = { ok: false, label: 'error' }; }
+
+    // Gmail
+    try {
+      const { isGoogleConfigured } = require('../src/setup');
+      const configured = isGoogleConfigured();
+      status.gmail = configured ? { ok: true, label: 'connected' } : { ok: false, label: 'not set up' };
+    } catch {}
+
+    // Calendar (same Google credentials)
+    status.calendar = { ...status.gmail };
+
+    // Voice (Whisper)
+    try {
+      const { isLocalWhisperAvailable } = require('../src/voice');
+      const available = isLocalWhisperAvailable();
+      status.voice = available ? { ok: true, label: 'ready' } : { ok: false, label: 'model missing' };
+    } catch { status.voice = { ok: false, label: 'model missing' }; }
+
+    return status;
   });
 
   // --- Conversational Goal Interview ---

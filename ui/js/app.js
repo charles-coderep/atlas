@@ -141,6 +141,7 @@ async function loadScreen(screen) {
     case 'files': return loadFiles();
     case 'email': return loadEmail();
     case 'settings': return loadSettings();
+    case 'guide': return loadGuide();
   }
 }
 
@@ -1822,11 +1823,326 @@ async function convertToWav(webmBuffer) {
   return wavBuffer;
 }
 
+// === Health Check ===
+
+async function runHealthCheck() {
+  try {
+    const status = await atlas.health.check();
+    const bar = document.getElementById('health-status');
+    const items = [
+      { key: 'ai', label: 'AI' },
+      { key: 'database', label: 'Database' },
+      { key: 'gmail', label: 'Gmail' },
+      { key: 'calendar', label: 'Calendar' },
+      { key: 'voice', label: 'Voice' },
+    ];
+    bar.innerHTML = items.map(({ key, label }) => {
+      const s = status[key];
+      const cls = s.ok ? 'ok' : (s.label === 'not set up' || s.label === 'model missing') ? 'warn' : 'err';
+      return `<span class="health-item"><span class="health-dot ${cls}"></span>${label}: ${s.label}</span>`;
+    }).join('');
+    bar.style.display = 'flex';
+
+    if (!status.ai.ok) {
+      showToast('AI engine (Claude CLI) not found. Briefs, sessions, and chat require it. Other features still work.', 'warning', 8000);
+    }
+  } catch {}
+}
+
+// === Guide ===
+
+const GUIDE_SECTIONS = [
+  {
+    id: 'what-atlas-is',
+    title: 'What Atlas Is',
+    content: `<p>Atlas is a strategic adviser that knows your goals, your situation, and your history. It gives specific, tactical advice — not generic motivation. Think of it as a senior consultant who remembers every conversation you've had and brings that full picture to bear on whatever you're facing.</p>
+<p>Atlas is not a chatbot. It doesn't just answer questions. It proactively challenges your thinking, tracks your commitments, notices when you're drifting from your goals, and tells you what it thinks you should do — even when you didn't ask.</p>`
+  },
+  {
+    id: 'how-atlas-thinks',
+    title: 'How Atlas Thinks',
+    content: `<p><strong>Before every session:</strong> Atlas loads your goals, your situation, recent session history, open actions, persistent insights, and any connected sources like email or calendar. It arrives at the conversation already briefed.</p>
+<p><strong>During the session:</strong> If the conversation goes somewhere unexpected, Atlas can search the web, recall past memory entries, or dig into your email for older context. It doesn't just work with what it started with.</p>
+<p><strong>After every session:</strong> Atlas processes the conversation — extracting decisions, commitments, insights, and patterns. Important items are stored in memory. Action items are tracked with due dates. This is why Atlas gets sharper over time — every session makes the next one better.</p>
+<svg width="520" height="160" viewBox="0 0 520 160" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect x="10" y="50" width="110" height="44" rx="8" stroke="#6c8cff" stroke-width="1.5" fill="rgba(108,140,255,0.08)"/>
+  <text x="65" y="76" text-anchor="middle" fill="#f0f2f5" font-size="12" font-family="Segoe UI, sans-serif">Load Context</text>
+  <rect x="150" y="50" width="110" height="44" rx="8" stroke="#6c8cff" stroke-width="1.5" fill="rgba(108,140,255,0.08)"/>
+  <text x="205" y="76" text-anchor="middle" fill="#f0f2f5" font-size="12" font-family="Segoe UI, sans-serif">Advisory Session</text>
+  <rect x="290" y="50" width="110" height="44" rx="8" stroke="#6c8cff" stroke-width="1.5" fill="rgba(108,140,255,0.08)"/>
+  <text x="345" y="76" text-anchor="middle" fill="#f0f2f5" font-size="12" font-family="Segoe UI, sans-serif">Processing</text>
+  <rect x="430" y="50" width="80" height="44" rx="8" stroke="#4ade80" stroke-width="1.5" fill="rgba(74,222,128,0.08)"/>
+  <text x="470" y="76" text-anchor="middle" fill="#f0f2f5" font-size="12" font-family="Segoe UI, sans-serif">Memory</text>
+  <path d="M120 72 L150 72" stroke="#6c8cff" stroke-width="1.5" marker-end="url(#arrowG)"/>
+  <path d="M260 72 L290 72" stroke="#6c8cff" stroke-width="1.5" marker-end="url(#arrowG)"/>
+  <path d="M400 72 L430 72" stroke="#4ade80" stroke-width="1.5" marker-end="url(#arrowGr)"/>
+  <path d="M470 94 C470 140 65 140 65 94" stroke="#a0a4b4" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#arrowM)"/>
+  <text x="120" y="62" fill="#a0a4b4" font-size="10" font-family="Segoe UI, sans-serif">before</text>
+  <text x="260" y="62" fill="#a0a4b4" font-size="10" font-family="Segoe UI, sans-serif">after</text>
+  <text x="270" y="148" text-anchor="middle" fill="#a0a4b4" font-size="10" font-family="Segoe UI, sans-serif">next session</text>
+  <defs>
+    <marker id="arrowG" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0 0 L8 3 L0 6" fill="none" stroke="#6c8cff" stroke-width="1.2"/></marker>
+    <marker id="arrowGr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0 0 L8 3 L0 6" fill="none" stroke="#4ade80" stroke-width="1.2"/></marker>
+    <marker id="arrowM" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0 0 L8 3 L0 6" fill="none" stroke="#a0a4b4" stroke-width="1.2"/></marker>
+  </defs>
+</svg>`
+  },
+  {
+    id: 'goals',
+    title: 'Goals',
+    content: `<p>A goal is the organising unit of Atlas. Everything Atlas does is oriented around your active goals. When you create a goal, Atlas interviews you conversationally to understand what you're trying to achieve, why it matters, what constraints you have, and what usually gets in your way.</p>
+<p>Atlas protects your declared goals by default. If you start drifting toward distractions, Atlas will name it and challenge you — respectfully but directly. Goals can be paused, achieved, or revised when genuine evidence warrants it.</p>`
+  },
+  {
+    id: 'actions',
+    title: 'Actions and Follow-Up',
+    content: `<p>Actions are commitments that Atlas extracts from your conversations. When you agree to do something during a session — "I'll follow up with that recruiter tomorrow" — Atlas logs it as an action with a due date.</p>
+<p>Atlas follows up. If an action is overdue, Atlas will mention it at the start of your next session. If you've been followed up on three times with no progress, Atlas will diagnose the obstacle and recommend either doing it immediately or dropping it. This is accountability without guilt-tripping.</p>
+<svg width="560" height="80" viewBox="0 0 560 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect x="0" y="20" width="80" height="36" rx="6" stroke="#6c8cff" stroke-width="1.5" fill="rgba(108,140,255,0.08)"/>
+  <text x="40" y="42" text-anchor="middle" fill="#f0f2f5" font-size="10" font-family="Segoe UI, sans-serif">Session Start</text>
+  <rect x="105" y="20" width="80" height="36" rx="6" stroke="#6c8cff" stroke-width="1.5" fill="rgba(108,140,255,0.08)"/>
+  <text x="145" y="42" text-anchor="middle" fill="#f0f2f5" font-size="10" font-family="Segoe UI, sans-serif">Atlas Opens</text>
+  <rect x="210" y="20" width="80" height="36" rx="6" stroke="#6c8cff" stroke-width="1.5" fill="rgba(108,140,255,0.08)"/>
+  <text x="250" y="42" text-anchor="middle" fill="#f0f2f5" font-size="10" font-family="Segoe UI, sans-serif">Conversation</text>
+  <rect x="315" y="20" width="80" height="36" rx="6" stroke="#6c8cff" stroke-width="1.5" fill="rgba(108,140,255,0.08)"/>
+  <text x="355" y="42" text-anchor="middle" fill="#f0f2f5" font-size="10" font-family="Segoe UI, sans-serif">Session Ends</text>
+  <rect x="420" y="20" width="80" height="36" rx="6" stroke="#fbbf24" stroke-width="1.5" fill="rgba(251,191,36,0.08)"/>
+  <text x="460" y="42" text-anchor="middle" fill="#f0f2f5" font-size="10" font-family="Segoe UI, sans-serif">Processing</text>
+  <rect x="525" y="20" width="30" height="36" rx="6" stroke="#4ade80" stroke-width="1.5" fill="rgba(74,222,128,0.08)"/>
+  <text x="540" y="46" text-anchor="middle" fill="#4ade80" font-size="14" font-family="Segoe UI, sans-serif">&#10003;</text>
+  <path d="M80 38 L105 38" stroke="#6c8cff" stroke-width="1.2" marker-end="url(#arrowG)"/>
+  <path d="M185 38 L210 38" stroke="#6c8cff" stroke-width="1.2" marker-end="url(#arrowG)"/>
+  <path d="M290 38 L315 38" stroke="#6c8cff" stroke-width="1.2" marker-end="url(#arrowG)"/>
+  <path d="M395 38 L420 38" stroke="#fbbf24" stroke-width="1.2" marker-end="url(#arrowY)"/>
+  <path d="M500 38 L525 38" stroke="#4ade80" stroke-width="1.2" marker-end="url(#arrowGr)"/>
+  <text x="460" y="70" text-anchor="middle" fill="#a0a4b4" font-size="9" font-family="Segoe UI, sans-serif">Summary + Entries + Actions</text>
+  <defs>
+    <marker id="arrowY" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0 0 L8 3 L0 6" fill="none" stroke="#fbbf24" stroke-width="1.2"/></marker>
+  </defs>
+</svg>`
+  },
+  {
+    id: 'memory',
+    title: 'Memory',
+    content: `<p>Atlas has two kinds of memory. Your user files (Identity, Situation, Preferences) are stable context you maintain — they describe who you are, where you are in life, and how you want Atlas to work with you. These change rarely.</p>
+<p>Everything else — session summaries, extracted insights, patterns, decisions — is captured automatically by Atlas after each session. High-importance items persist indefinitely. Routine items stay in a 7-day window and fade. You can browse all of it on the Memory screen.</p>`
+  },
+  {
+    id: 'sources',
+    title: 'Sources — Email, Calendar, Files',
+    content: `<p>Sources are data feeds that Atlas can draw from to give better advice. Not every source is relevant to every goal.</p>
+<p><strong>Email:</strong> Atlas scans your recent inbox, ranks emails by relevance to your active goals, and deeply reads the most important ones. It summarises what it found — it doesn't dump raw emails into its thinking. You control which goals use email through source settings.</p>
+<p><strong>Calendar:</strong> Atlas reads your upcoming events so it can factor your schedule into advice. "You have an interview at 2pm, so front-load applications this morning."</p>
+<p><strong>Files:</strong> You can upload documents — CVs, job descriptions, bank statements, recipes, health records — and link them to specific goals. Atlas reads the content and references it in sessions.</p>
+<p>Not every goal needs every source. A health goal probably doesn't need email. A job search goal probably doesn't need recipes. Atlas manages this through per-goal source settings.</p>`
+  },
+  {
+    id: 'perspectives',
+    title: 'Advisory Perspectives',
+    content: `<p>When Atlas thinks about your problem, it doesn't just give one generic answer. It considers your situation through multiple specialist lenses — like having a team of advisers in one conversation.</p>
+<p>For a job search goal, Atlas might think through: a job search strategist lens (application volume, skill matching), a financial lens (runway, salary requirements), a day planner lens (time allocation), and a learning lens (skill gaps). For a health goal, it might think through: a nutrition lens, a fitness lens, and a habit formation lens.</p>
+<p>These perspectives are created automatically when you set up a goal. Atlas suggests which ones are relevant based on what you tell it, and you approve or adjust. You never need to manage them manually — but if you're curious, you can see them in Settings.</p>
+<svg width="400" height="280" viewBox="0 0 400 280" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect x="145" y="10" width="110" height="40" rx="8" stroke="#6c8cff" stroke-width="2" fill="rgba(108,140,255,0.12)"/>
+  <text x="200" y="35" text-anchor="middle" fill="#f0f2f5" font-size="13" font-weight="600" font-family="Segoe UI, sans-serif">Your Goal</text>
+  <rect x="10" y="90" width="100" height="52" rx="6" stroke="#4ade80" stroke-width="1.2" fill="rgba(74,222,128,0.06)"/>
+  <text x="60" y="112" text-anchor="middle" fill="#a0a4b4" font-size="10" font-family="Segoe UI, sans-serif">Sources</text>
+  <text x="60" y="126" text-anchor="middle" fill="#6e7280" font-size="9" font-family="Segoe UI, sans-serif">email, cal, files</text>
+  <rect x="150" y="90" width="100" height="52" rx="6" stroke="#fbbf24" stroke-width="1.2" fill="rgba(251,191,36,0.06)"/>
+  <text x="200" y="112" text-anchor="middle" fill="#a0a4b4" font-size="10" font-family="Segoe UI, sans-serif">Memory</text>
+  <text x="200" y="126" text-anchor="middle" fill="#6e7280" font-size="9" font-family="Segoe UI, sans-serif">entries, sessions</text>
+  <rect x="290" y="90" width="100" height="52" rx="6" stroke="#6c8cff" stroke-width="1.2" fill="rgba(108,140,255,0.06)"/>
+  <text x="340" y="112" text-anchor="middle" fill="#a0a4b4" font-size="10" font-family="Segoe UI, sans-serif">Perspectives</text>
+  <text x="340" y="126" text-anchor="middle" fill="#6e7280" font-size="9" font-family="Segoe UI, sans-serif">specialist lenses</text>
+  <line x1="180" y1="50" x2="60" y2="90" stroke="#a0a4b4" stroke-width="1" stroke-dasharray="3 3"/>
+  <line x1="200" y1="50" x2="200" y2="90" stroke="#a0a4b4" stroke-width="1" stroke-dasharray="3 3"/>
+  <line x1="220" y1="50" x2="340" y2="90" stroke="#a0a4b4" stroke-width="1" stroke-dasharray="3 3"/>
+  <line x1="60" y1="142" x2="200" y2="190" stroke="#4ade80" stroke-width="1"/>
+  <line x1="200" y1="142" x2="200" y2="190" stroke="#fbbf24" stroke-width="1"/>
+  <line x1="340" y1="142" x2="200" y2="190" stroke="#6c8cff" stroke-width="1"/>
+  <rect x="130" y="190" width="140" height="44" rx="8" stroke="#6c8cff" stroke-width="2" fill="rgba(108,140,255,0.12)"/>
+  <text x="200" y="216" text-anchor="middle" fill="#f0f2f5" font-size="12" font-weight="600" font-family="Segoe UI, sans-serif">Atlas's Response</text>
+</svg>
+<p><strong>Why this matters:</strong> Without perspectives, Atlas might give you great career advice but forget to check whether you can afford the time investment. With perspectives, it catches blind spots that a single train of thought would miss.</p>`
+  },
+  {
+    id: 'methodology',
+    title: 'The Methodology',
+    content: `<p>Atlas doesn't make up its advisory approach. It follows a research-backed methodology covering goal formation, decision-making frameworks, drift detection, accountability structures, and follow-up techniques. This methodology is based on published research in goal-setting theory, behavioural psychology, and executive advisory practice.</p>
+<p>You can read the full methodology in Settings. It governs how Atlas interviews you about goals, how it challenges drift, how it scores what to remember, and how it classifies actions.</p>`
+  },
+  {
+    id: 'user-files',
+    title: 'Your User Files',
+    content: `<p>Three files describe you to Atlas:</p>
+<p><strong>Identity</strong> — Stable facts: your name, location, background, communication style. Changes rarely. Think of it as your professional bio for Atlas.</p>
+<p><strong>Situation</strong> — Current reality: employment, finances, living situation, major life factors. Update this when your circumstances change.</p>
+<p><strong>Preferences</strong> — How you want Atlas to work: directness level, working hours, protected time blocks, brief detail level. Set once, adjust as needed.</p>
+<p>You can edit these directly or talk to Atlas about them — click "Talk to Atlas about this" and have a conversation. Atlas proposes updates and you approve.</p>`
+  },
+  {
+    id: 'privacy',
+    title: 'Privacy and Data',
+    content: `<p>Atlas runs locally as a desktop app. Your conversations are processed through the AI engine (Claude CLI) which runs on your machine. Session data, goals, actions, and memory are stored in your Supabase database. Email and calendar data is fetched directly from your Google account using credentials stored locally — Atlas does not send your email data to third parties.</p>
+<p>Perspective files, user context files, and the methodology are stored as local files on your computer.</p>`
+  },
+  {
+    id: 'faq',
+    title: 'FAQ',
+    content: 'FAQ_PLACEHOLDER'
+  }
+];
+
+const FAQ_ITEMS = [
+  {
+    q: 'Is this just a chatbot?',
+    a: "No. A chatbot answers questions. Atlas tracks your goals across sessions, remembers what you committed to, follows up on overdue items, challenges your reasoning, and proactively raises issues you haven't asked about. The difference is continuity, accountability, and strategic depth."
+  },
+  {
+    q: 'How does memory work?',
+    a: "After every session, Atlas extracts the important parts — decisions, commitments, insights, patterns — and stores them. High-importance items persist forever. Routine items stay for 7 days. When your next session starts, Atlas loads the relevant memory so it's already up to speed."
+  },
+  {
+    q: 'Why does Atlas ask tough questions?',
+    a: "Because that's the point. Atlas is designed to protect your goals, not your feelings. If you're drifting, avoiding, or making a decision that conflicts with what you said you wanted, Atlas will name it. It does this respectfully but directly — like a trusted adviser who cares more about your results than your comfort."
+  },
+  {
+    q: 'Why is email included?',
+    a: "Email is a source, not a core feature. It's included because for some goals — like job searching — your inbox contains critical information: recruiter messages, interview confirmations, application responses. For goals where email isn't relevant, you can exclude it through goal settings."
+  },
+  {
+    q: 'What do the perspectives do?',
+    a: "They prevent blind spots. Each perspective is a specialist lens — like having a financial adviser check the money angle while a day planner checks the time angle. Atlas considers all relevant perspectives internally and gives you one unified answer. You never interact with them directly."
+  },
+  {
+    q: 'Can I trust the advice?',
+    a: "Atlas is direct about what it knows versus what it's inferring. When it states facts, it grounds them in your data. When it's guessing, it says so. Its methodology is research-backed and visible. But ultimately, Atlas advises — you decide. It will never override your judgment on decisions that depend on your values."
+  },
+  {
+    q: 'Do I need to read this whole guide?',
+    a: "No. Just fill in your user files (Identity, Situation, Preferences), create a goal, and start talking. Everything else — memory, perspectives, sources — works automatically. Come back to this guide when you're curious about why something works the way it does."
+  }
+];
+
+let guideRendered = false;
+
+function loadGuide() {
+  if (guideRendered) return;
+  guideRendered = true;
+
+  const container = document.getElementById('guide-content');
+  container.innerHTML = GUIDE_SECTIONS.map(section => {
+    let body = section.content;
+    if (body === 'FAQ_PLACEHOLDER') {
+      body = FAQ_ITEMS.map(faq =>
+        `<div class="faq-item collapsed">
+          <div class="faq-question" onclick="this.parentElement.classList.toggle('collapsed')">
+            <span>${escapeHtml(faq.q)}</span>
+            <span class="faq-arrow">&#9662;</span>
+          </div>
+          <div class="faq-answer">${escapeHtml(faq.a)}</div>
+        </div>`
+      ).join('');
+    }
+    return `<div class="guide-section" id="guide-${section.id}" data-title="${escapeHtml(section.title)}">
+      <div class="guide-section-header" onclick="this.parentElement.classList.toggle('collapsed')">
+        <h2>${section.title}</h2>
+        <span class="guide-section-arrow">&#9662;</span>
+      </div>
+      <div class="guide-section-body">${body}</div>
+    </div>`;
+  }).join('');
+
+  // Search functionality
+  const searchInput = document.getElementById('guide-search');
+  const clearBtn = document.getElementById('guide-search-clear');
+  const noResults = document.getElementById('guide-no-results');
+
+  searchInput.addEventListener('input', () => {
+    const query = searchInput.value.trim().toLowerCase();
+    clearBtn.style.display = query ? 'inline-flex' : 'none';
+
+    if (!query) {
+      // Reset: show all, collapse all
+      document.querySelectorAll('.guide-section').forEach(s => {
+        s.style.display = '';
+        s.classList.remove('collapsed');
+        // Remove highlights
+        s.querySelectorAll('.guide-highlight').forEach(h => {
+          h.replaceWith(document.createTextNode(h.textContent));
+        });
+      });
+      noResults.style.display = 'none';
+      return;
+    }
+
+    let matchCount = 0;
+    document.querySelectorAll('.guide-section').forEach(section => {
+      const title = section.dataset.title.toLowerCase();
+      const bodyEl = section.querySelector('.guide-section-body');
+      const bodyText = bodyEl.textContent.toLowerCase();
+
+      if (title.includes(query) || bodyText.includes(query)) {
+        section.style.display = '';
+        section.classList.remove('collapsed');
+        matchCount++;
+        highlightGuideMatches(bodyEl, query);
+      } else {
+        section.style.display = 'none';
+      }
+    });
+
+    if (matchCount === 0) {
+      noResults.textContent = 'No results for "' + searchInput.value.trim() + '". Try different keywords.';
+      noResults.style.display = 'block';
+    } else {
+      noResults.style.display = 'none';
+    }
+  });
+
+  clearBtn.addEventListener('click', () => {
+    searchInput.value = '';
+    searchInput.dispatchEvent(new Event('input'));
+    searchInput.focus();
+  });
+}
+
+function highlightGuideMatches(container, query) {
+  // Remove old highlights
+  container.querySelectorAll('.guide-highlight').forEach(h => {
+    h.replaceWith(document.createTextNode(h.textContent));
+  });
+  container.normalize();
+
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  const matches = [];
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    // Skip SVG text nodes
+    if (node.parentElement.closest('svg')) continue;
+    const idx = node.textContent.toLowerCase().indexOf(query);
+    if (idx >= 0) matches.push({ node, idx });
+  }
+
+  // Apply highlights in reverse to avoid offset issues
+  for (let i = matches.length - 1; i >= 0; i--) {
+    const { node, idx } = matches[i];
+    const span = document.createElement('span');
+    span.className = 'guide-highlight';
+    const range = document.createRange();
+    range.setStart(node, idx);
+    range.setEnd(node, idx + query.length);
+    range.surroundContents(span);
+  }
+}
+
 // === Init ===
 
 async function init() {
   await loadToday();
   initVoice();
+  runHealthCheck();
 
   try {
     cachedCalendarData = await atlas.calendar.fetch();
