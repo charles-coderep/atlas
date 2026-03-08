@@ -5,9 +5,14 @@ contextBridge.exposeInMainWorld('atlas', {
   goals: {
     getActive: () => ipcRenderer.invoke('goals:getActive'),
     getAll: () => ipcRenderer.invoke('goals:getAll'),
+    getArchived: () => ipcRenderer.invoke('goals:getArchived'),
     get: (id) => ipcRenderer.invoke('goals:get', id),
     save: (goal) => ipcRenderer.invoke('goals:save', goal),
     updateStatus: (id, status) => ipcRenderer.invoke('goals:updateStatus', id, status),
+    archive: (id) => ipcRenderer.invoke('goals:archive', id),
+    unarchive: (id) => ipcRenderer.invoke('goals:unarchive', id),
+    countLinked: (goalId) => ipcRenderer.invoke('goals:countLinked', goalId),
+    deleteCascade: (goalId, level) => ipcRenderer.invoke('goals:deleteCascade', goalId, level),
     generateId: () => ipcRenderer.invoke('goals:generateId'),
     updateSources: (id, sources) => ipcRenderer.invoke('goals:updateSources', id, sources),
   },
@@ -124,6 +129,8 @@ contextBridge.exposeInMainWorld('atlas', {
     getDiagnostics: () => ipcRenderer.invoke('settings:getDiagnostics'),
     getEngines: () => ipcRenderer.invoke('settings:getEngines'),
     setEngine: (name) => ipcRenderer.invoke('settings:setEngine', name),
+    getTones: () => ipcRenderer.invoke('settings:getTones'),
+    setTone: (name) => ipcRenderer.invoke('settings:setTone', name),
   },
 
   // Health

@@ -141,6 +141,12 @@
         </div>
         <button class="btn btn-primary" id="btn-new-goal">New Goal</button>
       </div>
+      <div class="filter-bar" id="goals-filter-bar">
+        <label class="checkbox-row" for="toggle-show-archived">
+          <input type="checkbox" id="toggle-show-archived">
+          <span>Show archived goals</span>
+        </label>
+      </div>
       <!-- Goal list (hidden during interview) -->
       <div id="goals-list"></div>
       <!-- Goal conversation panel (hidden by default) -->
@@ -271,12 +277,14 @@
         <p>Configuration and diagnostics.</p>
       </div>
       <div class="tabs">
-        <div class="tab active" data-tab="settings-integrations">Integrations</div>
+        <div class="tab active" data-tab="settings-style">Adviser Style</div>
+        <div class="tab" data-tab="settings-integrations">Integrations</div>
         <div class="tab" data-tab="settings-agents">Advisory Perspectives</div>
         <div class="tab" data-tab="settings-methodology">Methodology</div>
         <div class="tab" data-tab="settings-diagnostics">Diagnostics</div>
       </div>
-      <div id="settings-integrations" class="tab-content active"></div>
+      <div id="settings-style" class="tab-content active"></div>
+      <div id="settings-integrations" class="tab-content" style="display:none"></div>
       <div id="settings-agents" class="tab-content" style="display:none"></div>
       <div id="settings-methodology" class="tab-content" style="display:none"></div>
       <div id="settings-diagnostics" class="tab-content" style="display:none"></div>
@@ -306,6 +314,79 @@
         </button>
         <input type="text" class="chat-input" id="context-interview-input" placeholder="Tell Atlas about yourself..." autocomplete="off">
         <button class="btn btn-primary" id="btn-context-interview-send">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Perspective Editor Modal -->
+  <div class="modal-overlay" id="modal-agent-editor">
+    <div class="modal" style="max-width:760px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <div class="modal-title" id="agent-modal-title" style="margin-bottom:0">Perspective</div>
+        <button class="btn btn-sm" onclick="closeModal('modal-agent-editor')">Close</button>
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="agent-modal-name">Perspective Name</label>
+        <input class="form-input" id="agent-modal-name" placeholder="lowercase-hyphenated-name" autocomplete="off">
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="agent-modal-content">Spec Content</label>
+        <textarea class="form-textarea" id="agent-modal-content" rows="16" placeholder="# Perspective Name"></textarea>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal('modal-agent-editor')">Cancel</button>
+        <button class="btn btn-primary" id="agent-modal-save" data-mode="create">Save Perspective</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Perspective Delete Modal -->
+  <div class="modal-overlay" id="modal-agent-delete">
+    <div class="modal" style="max-width:480px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <div class="modal-title" style="margin-bottom:0">Delete Perspective</div>
+        <button class="btn btn-sm" onclick="closeModal('modal-agent-delete')">Close</button>
+      </div>
+      <p style="color:var(--text-secondary);margin-bottom:16px;line-height:1.6">
+        Delete <strong id="agent-delete-name"></strong>? Atlas will also remove it from any goals that still reference it.
+      </p>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal('modal-agent-delete')">Cancel</button>
+        <button class="btn btn-danger" id="agent-delete-confirm">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Goal Delete Modal -->
+  <div class="modal-overlay" id="modal-goal-delete">
+    <div class="modal" style="max-width:560px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <div class="modal-title" style="margin-bottom:0">Delete Goal</div>
+        <button class="btn btn-sm" onclick="closeModal('modal-goal-delete')">Close</button>
+      </div>
+      <div style="margin-bottom:16px;line-height:1.6">
+        <div style="margin-bottom:10px">Delete Goal: <strong id="goal-delete-title"></strong></div>
+        <div style="color:var(--text-secondary);margin-bottom:10px">This will permanently remove:</div>
+        <ul class="modal-count-list" id="goal-delete-counts"></ul>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Choose what to delete</label>
+        <label class="radio-option">
+          <input type="radio" name="goal-delete-level" value="goal_only" checked>
+          <span>Goal record only (keep related memory)</span>
+        </label>
+        <label class="radio-option">
+          <input type="radio" name="goal-delete-level" value="goal_and_memory">
+          <span>Goal + related memory entries and actions</span>
+        </label>
+        <label class="radio-option">
+          <input type="radio" name="goal-delete-level" value="goal_and_memory_and_files">
+          <span>Goal + related memory + attached files</span>
+        </label>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal('modal-goal-delete')">Cancel</button>
+        <button class="btn btn-danger" id="goal-delete-confirm">Delete Permanently</button>
       </div>
     </div>
   </div>

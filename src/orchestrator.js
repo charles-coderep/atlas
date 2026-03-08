@@ -6,9 +6,31 @@ const {
 } = require('./db');
 
 const crypto = require('crypto');
+const { getRuntimeFile, readRuntimeJson, writeRuntimeJson } = require('./runtime');
 
 const CONFIG_DIR = path.join(__dirname, '..', 'config');
 const TOKEN_CEILING = 6000;
+const SETTINGS_FILE = 'settings.json';
+const VALID_TONES = ['supportive', 'direct', 'challenging', 'uncompromising'];
+
+const TONE_METADATA = {
+  supportive: {
+    name: 'Supportive',
+    description: 'Encouraging first, honest underneath. Frames challenges as opportunities.',
+  },
+  direct: {
+    name: 'Direct',
+    description: 'Plain-spoken and efficient. Says it once, clearly, and moves on.',
+  },
+  challenging: {
+    name: 'Challenging',
+    description: 'Pushes harder. Holds commitments to a high standard.',
+  },
+  uncompromising: {
+    name: 'Uncompromising',
+    description: 'Maximum directness. No cushioning. Sharpest possible feedback.',
+  },
+};
 
 const DEFAULT_CONTEXT_SOURCES = {
   gmail: 'included',
@@ -169,6 +191,111 @@ function loadMethodology() {
   return content;
 }
 
+function normalizeToneName(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return VALID_TONES.includes(normalized) ? normalized : 'direct';
+}
+
+function getRuntimeSettings() {
+  return readRuntimeJson(SETTINGS_FILE, { activeTone: 'direct' });
+}
+
+function writeRuntimeSettings(nextSettings) {
+  const current = getRuntimeSettings();
+  const merged = { ...current, ...nextSettings };
+  writeRuntimeJson(SETTINGS_FILE, merged);
+  return merged;
+}
+
+function getSelectedTone() {
+  return normalizeToneName(getRuntimeSettings().activeTone || 'direct');
+}
+
+function getToneFilePath(name) {
+  return path.join(CONFIG_DIR, 'tone', `${normalizeToneName(name)}.md`);
+}
+
+function loadToneOverlay(name = getSelectedTone()) {
+  const selected = normalizeToneName(name);
+  const filePath = getToneFilePath(selected);
+  let content = loadFile(filePath).trim();
+  let resolvedName = selected;
+
+  if (!content) {
+    resolvedName = 'direct';
+    content = loadFile(getToneFilePath('direct')).trim();
+  }
+
+  return {
+    name: resolvedName,
+    filePath: getToneFilePath(resolvedName),
+    content,
+    ...TONE_METADATA[resolvedName],
+  };
+}
+
+function formatDirectnessLine(toneName) {
+  switch (normalizeToneName(toneName)) {
+    case 'supportive':
+      return '- **Directness level:** Supportive -- encouraging first, collaborative, and careful with difficult feedback';
+    case 'challenging':
+      return '- **Directness level:** Challenging -- push hard, call out drift early, and hold commitments to a high standard';
+    case 'uncompromising':
+      return '- **Directness level:** Uncompromising -- maximum directness, no cushioning, sharp feedback when the plan is weak';
+    case 'direct':
+    default:
+      return '- **Directness level:** Direct -- plain-spoken, balanced, and efficient';
+  }
+}
+
+function syncPreferencesTone(toneName) {
+  const filePath = path.join(CONFIG_DIR, 'user', 'PREFERENCES.md');
+  const directnessLine = formatDirectnessLine(toneName);
+  let content = loadFile(filePath);
+
+  if (!content.trim()) {
+    content = `# Preferences\n\n${directnessLine}\n`;
+  } else if (/\- \*\*Directness level:\*\*.*/i.test(content)) {
+    content = content.replace(/\- \*\*Directness level:\*\*.*/i, directnessLine);
+  } else {
+    content = `${content.trim()}\n${directnessLine}\n`;
+  }
+
+  fs.writeFileSync(filePath, content, 'utf-8');
+  return content;
+}
+
+function setSelectedTone(name) {
+  const normalized = normalizeToneName(name);
+  writeRuntimeSettings({ activeTone: normalized });
+  syncPreferencesTone(normalized);
+  return loadToneOverlay(normalized);
+}
+
+function mapDirectnessToTone(value) {
+  const raw = String(value == null ? '' : value).trim().toLowerCase();
+  if (!raw) return 'direct';
+
+  if (VALID_TONES.includes(raw)) return raw;
+  if (['low', 'gentle', 'supportive', 'soft', 'be gentle'].includes(raw)) return 'supportive';
+  if (['medium', 'balanced', 'normal', 'direct', 'be balanced'].includes(raw)) return 'direct';
+  if (['high', 'tough', 'challenge me', 'push hard', 'challenging'].includes(raw)) return 'challenging';
+  if (['brutal', 'no filter', 'maximum', 'uncompromising'].includes(raw)) return 'uncompromising';
+
+  const numeric = Number(raw);
+  if (!Number.isNaN(numeric)) {
+    if (numeric <= 2) return 'supportive';
+    if (numeric === 3) return 'direct';
+    if (numeric === 4) return 'challenging';
+    if (numeric >= 5) return 'uncompromising';
+  }
+
+  if (raw.includes('gentle') || raw.includes('support')) return 'supportive';
+  if (raw.includes('brutal') || raw.includes('no filter') || raw.includes('maximum')) return 'uncompromising';
+  if (raw.includes('challenge') || raw.includes('push') || raw.includes('tough')) return 'challenging';
+  return 'direct';
+}
+
 // --- Placeholder detection ---
 
 function hasPlaceholders(content) {
@@ -278,10 +405,12 @@ function rankContextSections(recentEntries, recentSessions, persistentEntries, c
 // --- System prompt builder ---
 
 async function buildSystemPrompt(goals, options = {}) {
+  const startedAt = Date.now();
   const userCtx = loadUserContext();
   const agentPolicy = getGoalAgentPolicy(goals);
   const agentSpecs = loadAgentSpecs(agentPolicy);
   const methodology = loadMethodology();
+  const toneOverlay = loadToneOverlay();
 
   const goalsBlock = goals.length > 0
     ? goals.map((g) => JSON.stringify(g.goal_data, null, 2)).join('\n\n')
@@ -308,17 +437,20 @@ async function buildSystemPrompt(goals, options = {}) {
   const coreSections = `You are Atlas, a strategic adviser. You are one entity -- the user talks only to you. Never mention subagents, internal processes, or orchestration.
 
 ## Your Character
-- Direct strategic adviser, not a life coach
-- Give specific, tactical advice grounded in the user's actual data
-- Challenge weak reasoning and avoidance patterns
-- Protect declared goals unless genuine evidence warrants revision
-- Detect drift, distraction, and low-value activity
-- Exercise strategic free will -- proactively share observations the user didn't ask for
-- Be concise, conversational, and practical
-- Never give generic advice that could apply to anyone
-- Default to a clear recommendation with reasoning, don't ask "what do you think?" when you have enough data to advise
-- Handle hard truths without softening -- state them plainly, present options immediately
-- Be the user's competitive advantage -- every interaction should make them more effective
+You are Atlas - a calm, sharp strategic adviser. You speak like a trusted senior colleague: warm but honest, precise but human.
+
+- Lead with a clear recommendation and your reasoning. Only ask questions when the decision genuinely depends on the user's values or preferences.
+- Ground every piece of advice in this user's actual data, goals, and situation. Generic advice has no place here.
+- When something is going wrong - drift, avoidance, weak reasoning - name it plainly and move straight to what you recommend instead. State the issue once, clearly, without dramatic framing.
+- Protect the user's declared goals. If they are drifting, say so and explain the cost. If the goal should genuinely change, explain why with evidence.
+- Share observations the user did not ask for when they are strategically valuable. Do not wait to be prompted on important patterns.
+- Speak conversationally. Keep responses concise and structured. Say each point once - do not restate in different words.
+- When you are uncertain, say so. Separate what you know from what you are inferring. Your confidence in the recommendation matters as much as the recommendation itself.
+- You are one adviser with one voice. Never reference internal systems, file names, perspectives, or orchestration. The user talks to Atlas, not to software.
+- If asked what model or AI you are during a conversation, say you are Atlas. Do not name your underlying engine or provider in chat. The Settings and Diagnostics screens may show the engine name for debugging purposes - that is fine.
+
+## Adviser Style
+${toneOverlay.content}
 
 ## User Identity [user-maintained]
 ${userCtx.identity}
@@ -354,13 +486,14 @@ Context marked [user-maintained] was written by the user. Context marked [auto-c
 5. Exercise strategic free will -- share unsolicited observations when valuable
 6. Track, follow up, escalate -- commitments matter
 7. Protect goals by default, revise when warranted with clear reasoning
-8. Never state personal facts about the user's finances, employment, or situation as known unless they appear explicitly in the user context files, goal records, or session history. If you are inferring, say so clearly.
-9. When citing market statistics or specific numbers, note whether this is from your general knowledge or verified data. Do not soften strategic judgments -- only separate what you know from what you are assuming.
+8. Distinguish what you know from what you are inferring. Known facts come from the user's context, goals, session history, or retrieved data. When making a strong recommendation based materially on inference, briefly state what you are basing it on: "Based on your goal listing four role families, I'm assuming you have multiple CV variants - correct me if that's wrong."
+9. When citing statistics, market data, or specific numbers, note whether this is from your general knowledge or from a search. Use web search when available and when current data would strengthen the recommendation rather than guessing.
 10. You have access to web search. Use it when you need current information -- job listings, company details, market data, news, or any factual claim you are not certain about. Do not guess at statistics or current facts when you could search instead. If you need to search, output [SEARCH: your query] and the system will execute it.
 11. You can recall past memory by outputting [RECALL: topic]. The system will search archived entries and feed results back to you.
 12. You can search the user's email history by outputting [EMAIL_SEARCH: query]. Use Gmail search syntax (sender, subject keywords, date ranges). Use this when you need older email context beyond the current session's scanned window.
 13. Never reference your own build documentation, phase plans, internal project files, or development process in advisory conversations. You are Atlas the adviser, not a software project. If the user asks about Atlas itself, keep the answer brief and redirect to their goals.
-14. Keep responses concise. Do not restate the same point in different words within a single response. Say it once, clearly, and move on.`;
+14. Keep responses concise. Do not restate the same point in different words within a single response. Say it once, clearly, and move on.
+15. If the user explicitly says this is a test session, that they are building the app, or that they just set up Atlas, treat that session as exploratory. Acknowledge the context. Do not treat test interactions as evidence of drift or missed commitments.`;
 
   // Build trimmable sections with context ranking
   const trimmableSections = rankContextSections(
@@ -440,6 +573,7 @@ Context marked [user-maintained] was written by the user. Context marked [auto-c
     availableAgents: listAgentFiles().map(f => f.replace(/\.md$/, '')),
   };
 
+  console.log(`[Timing] System prompt built in ${Date.now() - startedAt}ms`);
   return prompt;
 }
 
@@ -454,12 +588,28 @@ function generateGoalId() {
 // --- AI engine abstraction ---
 
 const ClaudeEngine = require('./engines/claude');
+const CodexEngine = require('./engines/codex');
 
 const engines = {
   claude: new ClaudeEngine(),
+  codex: new CodexEngine(),
 };
 
-let activeEngineName = (process.env.AI_ENGINE || 'claude').toLowerCase();
+const ENGINE_SETTINGS_FILE = getRuntimeFile('engine-settings.json');
+
+function loadPersistedEngineName() {
+  const parsed = readRuntimeJson('engine-settings.json', {});
+  if (parsed && typeof parsed.activeEngine === 'string') {
+    return parsed.activeEngine.toLowerCase();
+  }
+  return null;
+}
+
+function persistEngineName(name) {
+  writeRuntimeJson('engine-settings.json', { activeEngine: name });
+}
+
+let activeEngineName = (loadPersistedEngineName() || process.env.AI_ENGINE || 'claude').toLowerCase();
 
 function getEngine() {
   const engine = engines[activeEngineName];
@@ -470,26 +620,77 @@ function getEngine() {
 }
 
 function setEngine(name) {
-  if (!engines[name]) {
+  const normalized = String(name || '').toLowerCase();
+  if (!engines[normalized]) {
     throw new Error(`Unknown engine "${name}". Supported: ${Object.keys(engines).join(', ')}`);
   }
-  activeEngineName = name;
+  activeEngineName = normalized;
+  persistEngineName(activeEngineName);
 }
 
-function getAvailableEngines() {
-  return Object.keys(engines).map((name) => ({
-    name,
-    active: name === activeEngineName,
-    capabilities: engines[name].getCapabilities(),
+function getActiveEngineName() {
+  return activeEngineName;
+}
+
+async function getAvailableEngines() {
+  const entries = await Promise.all(Object.keys(engines).map(async (name) => {
+    let available = false;
+    try {
+      available = await engines[name].isAvailable();
+    } catch {}
+    return {
+      name,
+      active: name === activeEngineName,
+      available,
+      model: typeof engines[name].getPreferredModel === 'function' ? engines[name].getPreferredModel() : null,
+      capabilities: engines[name].getCapabilities(),
+    };
+  }));
+  return entries.map((entry) => ({
+    ...entry,
+    label: `${entry.available ? 'Available' : 'Unavailable'}${entry.active ? ' - selected' : ''}`,
   }));
 }
 
-function callClaude(prompt, systemPrompt, options = {}) {
-  return getEngine().send(prompt, systemPrompt, options);
+function getAvailableTones() {
+  const selected = getSelectedTone();
+  return VALID_TONES.map((tone) => ({
+    id: tone,
+    selected: tone === selected,
+    filePath: getToneFilePath(tone),
+    ...TONE_METADATA[tone],
+  }));
 }
 
-function callClaudeStreaming(prompt, systemPrompt, options = {}, onChunk) {
-  return getEngine().sendStreaming(prompt, systemPrompt, options, onChunk);
+module.exports = {
+  buildSystemPrompt, callClaude, callClaudeStreaming, callClaudeConversation,
+  loadUserContext, loadAgentSpecs, listAgentFiles, checkUserContextFiles,
+  getLastDiagnostics, generateGoalId, DEFAULT_CONTEXT_SOURCES, AGENT_DEFAULTS_BY_TYPE,
+  migrateGoalSources, generatePerspective, perspectiveExists,
+  getEngine, setEngine, getAvailableEngines, getActiveEngineName,
+  getSelectedTone, setSelectedTone, getAvailableTones, loadToneOverlay, mapDirectnessToTone, syncPreferencesTone,
+};
+
+async function callClaude(prompt, systemPrompt, options = {}) {
+  const startedAt = Date.now();
+  const label = options.label || 'Active AI engine responded';
+  const result = await getEngine().send(prompt, systemPrompt, options);
+  console.log(`[Timing] ${label} in ${Date.now() - startedAt}ms`);
+  return result;
+}
+
+async function callClaudeStreaming(prompt, systemPrompt, options = {}, onChunk) {
+  const startedAt = Date.now();
+  let firstChunkAt = null;
+  const result = await getEngine().sendStreaming(prompt, systemPrompt, options, (chunk) => {
+    if (firstChunkAt === null) {
+      firstChunkAt = Date.now();
+      console.log(`[Timing] Active AI engine first streaming chunk in ${firstChunkAt - startedAt}ms`);
+    }
+    if (onChunk) onChunk(chunk);
+  });
+  console.log(`[Timing] Active AI engine responded in ${Date.now() - startedAt}ms`);
+  return result;
 }
 
 function callClaudeConversation(prompt, systemPrompt, conversationHistory) {
@@ -499,11 +700,3 @@ function callClaudeConversation(prompt, systemPrompt, conversationHistory) {
 
   return callClaude(fullPrompt, systemPrompt);
 }
-
-module.exports = {
-  buildSystemPrompt, callClaude, callClaudeStreaming, callClaudeConversation,
-  loadUserContext, loadAgentSpecs, listAgentFiles, checkUserContextFiles,
-  getLastDiagnostics, generateGoalId, DEFAULT_CONTEXT_SOURCES, AGENT_DEFAULTS_BY_TYPE,
-  migrateGoalSources, generatePerspective, perspectiveExists,
-  getEngine, setEngine, getAvailableEngines,
-};

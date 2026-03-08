@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const readline = require('readline');
 const { saveGoal } = require('./db');
-const { callClaude } = require('./orchestrator');
+const { callClaude, mapDirectnessToTone, setSelectedTone } = require('./orchestrator');
 
 const REQUIRED_QUESTIONS = [
   'What do you want to achieve?',
@@ -217,6 +217,8 @@ Rules:
       goalRecord.atlas_directness = 'high';
     }
 
+    setSelectedTone(mapDirectnessToTone(goalRecord.atlas_directness));
+
     await saveGoal({
       id: goalRecord.id,
       title: goalRecord.title,
@@ -254,6 +256,8 @@ Rules:
       status: 'active',
       created_at: new Date().toISOString().split('T')[0],
     };
+
+    setSelectedTone(mapDirectnessToTone(fallbackGoal.atlas_directness));
 
     await saveGoal({
       id: fallbackGoal.id,

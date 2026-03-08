@@ -1,13 +1,28 @@
-const { spawn, execSync } = require('child_process');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { spawn, execFileSync, execSync } = require('child_process');
 const BaseEngine = require('./base');
 
 class ClaudeEngine extends BaseEngine {
   constructor() {
     super('claude');
+    this.preferredModel = process.env.ATLAS_CLAUDE_MODEL || 'claude-opus-4-6';
+  }
+
+  _bin() {
+    if (process.platform !== 'win32') return 'claude';
+    const candidates = [
+      process.env.CLAUDE_PATH,
+      path.join(os.homedir(), '.local', 'bin', 'claude.exe'),
+      'claude',
+    ].filter(Boolean);
+    return candidates.find((candidate) => !path.isAbsolute(candidate) || fs.existsSync(candidate)) || 'claude';
   }
 
   _buildArgs(systemPrompt, options = {}) {
     const args = ['--print'];
+    args.push('--model', options.model || this.preferredModel);
     if (systemPrompt) args.push('--system-prompt', systemPrompt);
     args.push('--tools', '');
     if (options.allowedTools && options.allowedTools.length > 0) {
@@ -23,7 +38,7 @@ class ClaudeEngine extends BaseEngine {
   async send(prompt, systemPrompt, options = {}) {
     return new Promise((resolve, reject) => {
       const args = this._buildArgs(systemPrompt, options);
-      const proc = spawn('claude', args, { env: this._env(), windowsHide: true });
+      const proc = spawn(this._bin(), args, { env: this._env(), windowsHide: true });
 
       let stdout = '';
       let stderr = '';
@@ -33,14 +48,14 @@ class ClaudeEngine extends BaseEngine {
 
       proc.on('close', (code) => {
         if (code !== 0) {
-          reject(new Error(`claude CLI exited with code ${code}: ${stderr}`));
+          reject(new Error(`Active AI engine (${this.name}) exited with code ${code}: ${stderr}`));
         } else {
           resolve(stdout.trim());
         }
       });
 
       proc.on('error', (err) => {
-        reject(new Error(`Failed to spawn claude CLI: ${err.message}`));
+        reject(new Error(`Failed to start active AI engine (${this.name}): ${err.message}`));
       });
 
       proc.stdin.write(prompt);
@@ -51,7 +66,7 @@ class ClaudeEngine extends BaseEngine {
   async sendStreaming(prompt, systemPrompt, options = {}, onChunk) {
     return new Promise((resolve, reject) => {
       const args = this._buildArgs(systemPrompt, options);
-      const proc = spawn('claude', args, { env: this._env(), windowsHide: true });
+      const proc = spawn(this._bin(), args, { env: this._env(), windowsHide: true });
 
       let fullOutput = '';
       let stderr = '';
@@ -66,14 +81,14 @@ class ClaudeEngine extends BaseEngine {
 
       proc.on('close', (code) => {
         if (code !== 0) {
-          reject(new Error(`claude CLI exited with code ${code}: ${stderr}`));
+          reject(new Error(`Active AI engine (${this.name}) exited with code ${code}: ${stderr}`));
         } else {
           resolve(fullOutput.trim());
         }
       });
 
       proc.on('error', (err) => {
-        reject(new Error(`Failed to spawn claude CLI: ${err.message}`));
+        reject(new Error(`Failed to start active AI engine (${this.name}): ${err.message}`));
       });
 
       proc.stdin.write(prompt);
@@ -82,8 +97,14 @@ class ClaudeEngine extends BaseEngine {
   }
 
   async isAvailable() {
+    const bin = this._bin();
+    if (path.isAbsolute(bin) && fs.existsSync(bin)) return true;
     try {
-      execSync('claude --version', { stdio: 'pipe', timeout: 5000, windowsHide: true });
+      if (process.platform === 'win32') {
+        execFileSync(bin, ['--version'], { stdio: 'pipe', timeout: 5000, windowsHide: true, env: this._env() });
+      } else {
+        execSync('claude --version', { stdio: 'pipe', timeout: 5000, windowsHide: true });
+      }
       return true;
     } catch {
       return false;
@@ -97,6 +118,10 @@ class ClaudeEngine extends BaseEngine {
       webSearch: true,
       localCli: true,
     };
+  }
+
+  getPreferredModel() {
+    return this.preferredModel;
   }
 }
 

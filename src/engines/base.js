@@ -32,6 +32,10 @@ class BaseEngine {
       localCli: false,
     };
   }
+
+  getPreferredModel() {
+    return null;
+  }
 }
 
 module.exports = BaseEngine;

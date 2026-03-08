@@ -78,6 +78,100 @@ async function getAllGoals() {
   return data;
 }
 
+async function archiveGoal(id) {
+  return updateGoalStatus(id, 'archived');
+}
+
+async function unarchiveGoal(id) {
+  return updateGoalStatus(id, 'active');
+}
+
+async function getArchivedGoals() {
+  const db = getClient();
+  const { data, error } = await db
+    .from('goals')
+    .select('*')
+    .eq('status', 'archived')
+    .order('created_at');
+
+  if (error) throw error;
+  return data;
+}
+
+async function countTableByGoal(table, goalId) {
+  const db = getClient();
+  const { count, error } = await db
+    .from(table)
+    .select('*', { count: 'exact', head: true })
+    .eq('goal_id', goalId);
+
+  if (error) throw error;
+  return count || 0;
+}
+
+async function countGoalLinkedItems(goalId) {
+  const [entries, actions, overrides, files] = await Promise.all([
+    countTableByGoal('entries', goalId),
+    countTableByGoal('actions', goalId),
+    countTableByGoal('overrides', goalId),
+    countTableByGoal('files', goalId),
+  ]);
+
+  return {
+    goal: 1,
+    entries,
+    actions,
+    overrides,
+    files,
+  };
+}
+
+async function deleteGoalCascade(goalId, level) {
+  const db = getClient();
+  const goal = await getGoal(goalId);
+  if (!goal) {
+    throw new Error(`Goal not found: ${goalId}`);
+  }
+
+  const validLevels = ['goal_only', 'goal_and_memory', 'goal_and_memory_and_files'];
+  if (!validLevels.includes(level)) {
+    throw new Error(`Invalid delete level "${level}"`);
+  }
+
+  if (level === 'goal_only') {
+    const [entriesResult, actionsResult, overridesResult, filesResult, goalResult] = await Promise.all([
+      db.from('entries').update({ goal_id: null }).eq('goal_id', goalId),
+      db.from('actions').update({ goal_id: null }).eq('goal_id', goalId),
+      db.from('overrides').update({ goal_id: null }).eq('goal_id', goalId),
+      db.from('files').update({ goal_id: null }).eq('goal_id', goalId),
+      db.from('goals').delete().eq('id', goalId),
+    ]);
+
+    for (const result of [entriesResult, actionsResult, overridesResult, filesResult, goalResult]) {
+      if (result.error) throw result.error;
+    }
+
+    return { deletedGoalId: goalId, level };
+  }
+
+  const deleteFiles = level === 'goal_and_memory_and_files';
+  const [entriesResult, actionsResult, overridesResult, filesResult, goalResult] = await Promise.all([
+    db.from('entries').delete().eq('goal_id', goalId),
+    db.from('actions').delete().eq('goal_id', goalId),
+    db.from('overrides').delete().eq('goal_id', goalId),
+    deleteFiles
+      ? db.from('files').delete().eq('goal_id', goalId)
+      : db.from('files').update({ goal_id: null }).eq('goal_id', goalId),
+    db.from('goals').delete().eq('id', goalId),
+  ]);
+
+  for (const result of [entriesResult, actionsResult, overridesResult, filesResult, goalResult]) {
+    if (result.error) throw result.error;
+  }
+
+  return { deletedGoalId: goalId, level };
+}
+
 // --- Sessions ---
 
 async function createSession(mode) {
@@ -330,7 +424,7 @@ async function getAllOverrides() {
 
 module.exports = {
   initDB, getClient,
-  saveGoal, getActiveGoals, getGoal, updateGoalStatus, getAllGoals,
+  saveGoal, getActiveGoals, getGoal, updateGoalStatus, getAllGoals, archiveGoal, unarchiveGoal, getArchivedGoals, countGoalLinkedItems, deleteGoalCascade,
   createSession, updateSession, getRecentSessions,
   saveEntry, getRecentEntries, getPersistentEntries, getEntriesByGoal, getEntriesByType,
   saveAction, getOpenActions, updateAction, getOverdueActions, getCompletedActions, getAllActions,

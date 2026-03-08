@@ -1,5 +1,7 @@
 # Project Atlas v5 — Strategic Adviser
 
+> Note: this file is the product vision document, not a literal implementation snapshot. Current implementation truth lives in `CLAUDE.md` and the codebase. Important current differences include Supabase storage, Electron as the primary surface, and interchangeable `claude` / `codex` CLI backends with pinned models.
+
 ## 1. What Atlas Is
 
 Atlas is a **local-first Electron desktop application** that serves as a strategic adviser. The user opens it, talks to it, and receives sharp, specific, actionable advice grounded in deep knowledge of their goals, situation, history, and patterns.

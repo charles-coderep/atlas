@@ -7,6 +7,9 @@ let cachedCalendarData = null;
 let lastChatRole = null;
 let streamingMessageEl = null;
 let streamingContent = '';
+let showArchivedGoals = false;
+let openGoalMoreMenuId = null;
+let pendingGoalDelete = null;
 // Voice state managed in initVoice()
 let isRecording = false;
 
@@ -98,10 +101,10 @@ async function updateSourceStatuses() {
     const emailEl = document.getElementById('source-status-email');
     const emailGoals = goals.filter(g => g.goal_data?.context_sources?.gmail === 'included');
     if (emailGoals.length > 0) {
-      emailEl.textContent = `${emailGoals.length} goal${emailGoals.length > 1 ? 's' : ''}`;
+      emailEl.textContent = 'Active';
       emailEl.className = 'nav-source-status active';
     } else {
-      emailEl.textContent = 'inactive';
+      emailEl.textContent = 'Inactive';
       emailEl.className = 'nav-source-status';
     }
 
@@ -226,6 +229,7 @@ document.getElementById('btn-generate-brief').addEventListener('click', async ()
   const btn = document.getElementById('btn-generate-brief');
   const loading = document.getElementById('today-loading');
   const card = document.getElementById('brief-card');
+  const briefStartedAt = performance.now();
 
   btn.disabled = true;
   loading.style.display = 'flex';
@@ -237,6 +241,7 @@ document.getElementById('btn-generate-brief').addEventListener('click', async ()
     if (cachedEmailData) options.emailData = cachedEmailData;
 
     const brief = await atlas.brief.generate(options);
+    console.log(`[Timing] Brief generated in ${Math.round(performance.now() - briefStartedAt)}ms`);
     if (brief) {
       document.getElementById('brief-content').innerHTML = renderMarkdown(brief);
       document.getElementById('brief-time').textContent = timeNow();
@@ -259,8 +264,19 @@ document.getElementById('btn-generate-brief').addEventListener('click', async ()
 
 document.getElementById('btn-chat-start').addEventListener('click', async () => {
   const btn = document.getElementById('btn-chat-start');
+  const messages = document.getElementById('chat-messages');
+  let typingEl = null;
+  let thinkingNoteTimer = null;
+  const startTime = performance.now();
+
   btn.disabled = true;
-  document.getElementById('chat-status').textContent = 'Starting session...';
+  document.getElementById('chat-status').textContent = 'Atlas is preparing...';
+  messages.innerHTML = '';
+  lastChatRole = null;
+  typingEl = showTypingIndicator('chat-messages');
+  thinkingNoteTimer = window.setTimeout(() => {
+    appendChatMessage('chat-messages', 'system', 'Atlas is thinking - this can take a moment on first load.');
+  }, 10000);
 
   try {
     const options = {};
@@ -268,7 +284,10 @@ document.getElementById('btn-chat-start').addEventListener('click', async () => 
     if (cachedEmailData) options.emailData = cachedEmailData;
 
     const result = await atlas.chat.start(options);
+    console.log(`[Timing] Session opening generated in ${Math.round(performance.now() - startTime)}ms`);
     if (result.error) {
+      clearTimeout(thinkingNoteTimer);
+      removeTypingIndicator(typingEl);
       document.getElementById('chat-status').textContent = result.error;
       btn.disabled = false;
       return;
@@ -280,14 +299,19 @@ document.getElementById('btn-chat-start').addEventListener('click', async () => 
     document.getElementById('btn-chat-start').style.display = 'none';
     document.getElementById('btn-chat-end').style.display = 'inline-flex';
     document.getElementById('chat-input-bar').style.display = 'flex';
-    document.getElementById('chat-messages').innerHTML = '';
+    clearTimeout(thinkingNoteTimer);
+    removeTypingIndicator(typingEl);
 
     if (result.opening) {
       appendChatMessage('chat-messages', 'atlas', result.opening);
+    } else {
+      appendChatMessage('chat-messages', 'atlas', "I'm ready. What's the highest-leverage thing to work through?");
     }
 
     document.getElementById('chat-input').focus();
   } catch (err) {
+    clearTimeout(thinkingNoteTimer);
+    removeTypingIndicator(typingEl);
     document.getElementById('chat-status').textContent = `Error: ${err.message}`;
     btn.disabled = false;
   }
@@ -324,6 +348,9 @@ async function sendChatMessage() {
   const input = document.getElementById('chat-input');
   const message = input.value.trim();
   if (!message || !chatActive) return;
+  const requestStartedAt = performance.now();
+  let firstChunkLogged = false;
+  let streamErrored = false;
 
   input.value = '';
   input.disabled = true;
@@ -339,6 +366,11 @@ async function sendChatMessage() {
   atlas.chat.removeStreamListeners();
 
   atlas.chat.onStreamChunk((chunk) => {
+    if (!firstChunkLogged) {
+      console.log(`[Timing] Chat stream first chunk in ${Math.round(performance.now() - requestStartedAt)}ms`);
+      firstChunkLogged = true;
+    }
+    console.log(`[Streaming] chunk received (${chunk.length} chars)`);
     streamingContent += chunk;
     if (!streamingMessageEl) {
       // Remove typing indicator on first chunk
@@ -368,6 +400,7 @@ async function sendChatMessage() {
   });
 
   atlas.chat.onStreamError((err) => {
+    streamErrored = true;
     removeTypingIndicator(thinkingEl);
     if (streamingMessageEl) {
       streamingMessageEl.remove();
@@ -377,23 +410,32 @@ async function sendChatMessage() {
   });
 
   atlas.chat.onStreamReplace((fullText) => {
-    if (streamingMessageEl) {
-      const contentEl = streamingMessageEl.querySelector('.msg-content');
-      if (contentEl) {
-        contentEl.innerHTML = renderMarkdown(fullText);
-        contentEl.classList.remove('streaming-cursor');
-      }
-      streamingMessageEl.classList.remove('streaming');
+    streamCreated = true;
+    if (!streamingMessageEl) {
+      removeTypingIndicator(thinkingEl);
+      streamingMessageEl = appendChatMessage('chat-messages', 'atlas', '');
     }
+    const contentEl = streamingMessageEl.querySelector('.msg-content');
+    if (contentEl) {
+      contentEl.innerHTML = renderMarkdown(fullText);
+      contentEl.classList.remove('streaming-cursor');
+    }
+    streamingMessageEl.classList.remove('streaming');
   });
 
   const thinkingEl = showTypingIndicator('chat-messages');
 
   try {
     const result = await atlas.chat.sendStreaming(message);
+    console.log(`[Timing] Chat request completed in ${Math.round(performance.now() - requestStartedAt)}ms`);
 
     // Remove typing indicator if streaming never started
     removeTypingIndicator(thinkingEl);
+
+    if (!streamErrored && result && result.error) {
+      appendChatMessage('chat-messages', 'system', `Error: ${result.error}`);
+      return;
+    }
 
     // Show markers if any
     if (result && result.markers && result.markers.length > 0) {
@@ -472,33 +514,68 @@ async function loadGoals() {
   if (goalInterviewActive) return;
   const goals = await atlas.goals.getAll();
   const container = document.getElementById('goals-list');
+  const archiveToggle = document.getElementById('toggle-show-archived');
+  if (archiveToggle) archiveToggle.checked = showArchivedGoals;
+  const archivedCount = goals.filter((g) => g.status === 'archived').length;
+  const visibleGoals = [...goals]
+    .filter((g) => showArchivedGoals || g.status !== 'archived')
+    .sort((a, b) => {
+      const order = { active: 0, paused: 1, completed: 2, archived: 3 };
+      return (order[a.status] ?? 9) - (order[b.status] ?? 9);
+    });
 
   if (goals.length === 0) {
     container.innerHTML = '<div class="empty-state"><p>No goals defined yet. Click "New Goal" to get started.</p></div>';
     return;
   }
 
+  if (visibleGoals.length === 0) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <p>No goals match the current filter.</p>
+        ${archivedCount > 0 ? '<p style="color:var(--text-secondary)">You have archived goals. Turn on "Show archived goals" to see them.</p>' : ''}
+      </div>
+    `;
+    return;
+  }
+
   let allAgents = [];
   try { allAgents = await atlas.settings.listAgentFiles(); } catch {}
 
-  container.innerHTML = goals.map((g) => {
+  container.innerHTML = `
+    ${!showArchivedGoals && archivedCount > 0 ? `<div class="card"><div class="card-body">Archived goals are hidden by default. Turn on "Show archived goals" to review or restore ${archivedCount} archived goal${archivedCount !== 1 ? 's' : ''}.</div></div>` : ''}
+    ${visibleGoals.map((g) => {
     const data = g.goal_data || {};
-    const statusTag = g.status === 'active' ? 'tag-success' : g.status === 'paused' ? 'tag-warning' : 'tag-secondary';
+    const statusTag = g.status === 'active'
+      ? 'tag-success'
+      : g.status === 'paused'
+        ? 'tag-warning'
+        : 'tag-secondary';
+    const statusLabel = g.status === 'completed' ? 'achieved' : g.status;
     const priorityTag = g.priority === 'primary' ? 'tag-primary' : g.priority === 'secondary' ? 'tag-warning' : 'tag-secondary';
     const goalAgents = (data.context_sources && Array.isArray(data.context_sources.agents))
       ? data.context_sources.agents : [];
+    const isActive = g.status === 'active';
+    const isPaused = g.status === 'paused';
+    const isCompleted = g.status === 'completed';
+    const isArchived = g.status === 'archived';
+
+    let statusDescription = 'This goal is in focus. Atlas includes it in briefs and sessions.';
+    if (isPaused) statusDescription = 'This goal is on hold. Atlas ignores it until you reactivate.';
+    if (isCompleted) statusDescription = "You completed this goal. It's archived but can be reopened.";
+    if (isArchived) statusDescription = 'This goal is hidden from normal views. Its history stays searchable and you can restore it anytime.';
 
     const agentBadges = allAgents.map((a) => {
       const active = goalAgents.includes(a);
-      return `<span class="tag ${active ? 'tag-primary' : 'tag-secondary'}" style="cursor:pointer;font-size:11px;margin:2px" onclick="toggleGoalAgent('${g.id}', '${a}', ${active})" title="${active ? 'Click to remove perspective' : 'Click to add perspective'}">${a}${active ? '' : ' +'}</span>`;
+      return `<span class="tag ${active ? 'tag-primary' : 'tag-secondary'}" style="cursor:pointer;font-size:12px;margin:2px" onclick="toggleGoalAgent('${g.id}', '${a}', ${active})" title="${active ? 'Click to remove perspective' : 'Click to add perspective'}">${a}${active ? '' : ' +'}</span>`;
     }).join('');
 
-    return `<div class="card">
+    return `<div class="card goal-card ${isArchived ? 'archived' : ''}">
       <div class="card-header">
         <span class="card-title">${escapeHtml(g.title)}</span>
         <div>
           <span class="tag ${priorityTag}">${g.priority || 'unset'}</span>
-          <span class="tag ${statusTag}">${g.status}</span>
+          <span class="tag ${statusTag}">${statusLabel}</span>
         </div>
       </div>
       <div class="card-body md-content">
@@ -507,29 +584,167 @@ async function loadGoals() {
         ${data.target_date ? `<div><strong>Target:</strong> ${data.target_date}</div>` : ''}
         ${data.baseline ? `<div><strong>Baseline:</strong> ${escapeHtml(data.baseline)}</div>` : ''}
         ${data.next_milestone ? `<div><strong>Next milestone:</strong> ${escapeHtml(data.next_milestone)}</div>` : ''}
+        <div class="goal-status-copy">${statusDescription}</div>
         <div style="margin-top:8px"><strong>Perspectives:</strong></div>
         <div style="margin-top:4px">${agentBadges}</div>
       </div>
-      <div style="margin-top:10px" class="btn-group">
-        <button class="btn btn-sm" onclick="startGoalEdit('${g.id}')" title="Update any details of this goal">Edit</button>
-        ${g.status === 'active' ? `<button class="btn btn-sm" onclick="updateGoalStatus('${g.id}', 'paused')" title="Temporarily remove from active focus. Atlas won't include it in briefs.">Pause</button>` : ''}
-        ${g.status === 'paused' ? `<button class="btn btn-sm" onclick="updateGoalStatus('${g.id}', 'active')" title="Bring this goal back into active focus.">Resume</button>` : ''}
-        ${g.status === 'completed' ? `<button class="btn btn-sm" onclick="updateGoalStatus('${g.id}', 'active')" title="Bring this goal back into active focus.">Reactivate</button>` : ''}
-        ${g.status !== 'completed' ? `<button class="btn btn-sm btn-primary" onclick="confirmAchieved('${g.id}')" title="Goal accomplished. Atlas archives it but you can reopen it.">Mark Achieved</button>` : ''}
+      <div class="goal-actions-row">
+        <div class="btn-group">
+          ${renderGoalActionButtons(g)}
+        </div>
+        ${isActive ? renderGoalMoreMenu(g.id) : ''}
       </div>
     </div>`;
-  }).join('');
+  }).join('')}
+  `;
 }
 
 async function updateGoalStatus(id, status) {
-  await atlas.goals.updateStatus(id, status);
-  loadGoals();
-  loadToday();
+  try {
+    await atlas.goals.updateStatus(id, status);
+    loadGoals();
+    loadToday();
+  } catch (err) {
+    showToast(`Failed to update goal: ${err.message}`, 'error');
+  }
 }
 
 function confirmAchieved(goalId) {
   if (confirm("Mark this goal as achieved? It'll move out of active focus and won't appear in briefs or sessions. You can reactivate it anytime.")) {
     updateGoalStatus(goalId, 'completed');
+  }
+}
+
+function renderGoalActionButtons(goal) {
+  const isActive = goal.status === 'active';
+  const isPaused = goal.status === 'paused';
+  const isCompleted = goal.status === 'completed';
+  const isArchived = goal.status === 'archived';
+
+  if (isActive) {
+    return `
+      <button class="btn btn-sm btn-primary" onclick="startGoalEdit('${goal.id}')" title="Update any details of this goal">Edit</button>
+      <button class="btn btn-sm" onclick="updateGoalStatus('${goal.id}', 'paused')" title="Temporarily remove from active focus. Atlas won't include it in briefs.">Pause</button>
+      <button class="btn btn-sm" onclick="confirmAchieved('${goal.id}')" title="Goal accomplished. Atlas moves it out of active focus but you can reopen it.">Mark Achieved</button>
+    `;
+  }
+
+  if (isPaused) {
+    return `
+      <button class="btn btn-sm btn-primary" onclick="updateGoalStatus('${goal.id}', 'active')" title="Bring this goal back into active focus.">Resume</button>
+      <button class="btn btn-sm" onclick="startGoalEdit('${goal.id}')" title="Update any details of this goal">Edit</button>
+      <button class="btn btn-sm" onclick="archiveGoal('${goal.id}')" title="Hide this goal from normal views without losing its history.">Archive</button>
+      <button class="btn btn-sm btn-danger" onclick="openGoalDeleteModal('${goal.id}')">Delete</button>
+    `;
+  }
+
+  if (isCompleted) {
+    return `
+      <button class="btn btn-sm btn-primary" onclick="updateGoalStatus('${goal.id}', 'active')" title="Bring this goal back into active focus.">Reactivate</button>
+      <button class="btn btn-sm" onclick="startGoalEdit('${goal.id}')" title="Update any details of this goal">Edit</button>
+      <button class="btn btn-sm" onclick="archiveGoal('${goal.id}')" title="Hide this goal from normal views without losing its history.">Archive</button>
+      <button class="btn btn-sm btn-danger" onclick="openGoalDeleteModal('${goal.id}')">Delete</button>
+    `;
+  }
+
+  if (isArchived) {
+    return `
+      <button class="btn btn-sm btn-primary" onclick="unarchiveGoal('${goal.id}')">Unarchive</button>
+      <button class="btn btn-sm" onclick="startGoalEdit('${goal.id}')" title="Update any details of this goal">Edit</button>
+      <button class="btn btn-sm btn-danger" onclick="openGoalDeleteModal('${goal.id}')">Delete</button>
+    `;
+  }
+
+  return `
+    <button class="btn btn-sm" onclick="startGoalEdit('${goal.id}')">Edit</button>
+  `;
+}
+
+function renderGoalMoreMenu(goalId) {
+  const open = openGoalMoreMenuId === goalId;
+  return `
+    <div class="goal-more">
+      <button class="btn btn-sm btn-ghost" data-goal-more-button="${goalId}" onclick="toggleGoalMoreMenu(event, '${goalId}')" title="More actions">...</button>
+      ${open ? `
+        <div class="goal-more-menu" data-goal-more-menu="${goalId}">
+          <button class="btn btn-sm btn-ghost" onclick="archiveGoal('${goalId}')">Archive</button>
+          <button class="btn btn-sm btn-danger" onclick="openGoalDeleteModal('${goalId}')">Delete</button>
+        </div>
+      ` : ''}
+    </div>
+  `;
+}
+
+function toggleGoalMoreMenu(event, goalId) {
+  event.stopPropagation();
+  openGoalMoreMenuId = openGoalMoreMenuId === goalId ? null : goalId;
+  loadGoals();
+}
+
+async function archiveGoal(goalId) {
+  try {
+    openGoalMoreMenuId = null;
+    await atlas.goals.archive(goalId);
+    showToast('Goal archived', 'success');
+    loadGoals();
+    loadToday();
+  } catch (err) {
+    showToast(`Archive failed: ${err.message}`, 'error');
+  }
+}
+
+async function unarchiveGoal(goalId) {
+  try {
+    await atlas.goals.unarchive(goalId);
+    showToast('Goal restored to active', 'success');
+    loadGoals();
+    loadToday();
+  } catch (err) {
+    showToast(`Unarchive failed: ${err.message}`, 'error');
+  }
+}
+
+async function openGoalDeleteModal(goalId) {
+  try {
+    const [goal, counts] = await Promise.all([
+      atlas.goals.get(goalId),
+      atlas.goals.countLinked(goalId),
+    ]);
+    if (!goal) return;
+
+    pendingGoalDelete = { id: goalId, title: goal.title, counts };
+    document.getElementById('goal-delete-title').textContent = goal.title;
+    document.getElementById('goal-delete-counts').innerHTML = `
+      <li>1 goal record</li>
+      <li>${counts.entries || 0} memory entr${(counts.entries || 0) === 1 ? 'y' : 'ies'} linked to this goal</li>
+      <li>${counts.actions || 0} action item${(counts.actions || 0) === 1 ? '' : 's'} linked to this goal</li>
+      <li>${counts.overrides || 0} override${(counts.overrides || 0) === 1 ? '' : 's'} linked to this goal</li>
+      <li>${counts.files || 0} file association${(counts.files || 0) === 1 ? '' : 's'}</li>
+    `;
+
+    const defaultOption = document.querySelector('input[name="goal-delete-level"][value="goal_only"]');
+    if (defaultOption) defaultOption.checked = true;
+    document.getElementById('modal-goal-delete').classList.add('active');
+  } catch (err) {
+    showToast(`Delete preview failed: ${err.message}`, 'error');
+  }
+}
+
+async function confirmGoalDelete() {
+  try {
+    if (!pendingGoalDelete) return;
+    const selected = document.querySelector('input[name="goal-delete-level"]:checked');
+    const level = selected ? selected.value : 'goal_only';
+    await atlas.goals.deleteCascade(pendingGoalDelete.id, level);
+    closeModal('modal-goal-delete');
+    pendingGoalDelete = null;
+    showToast('Goal deleted permanently', 'success');
+    loadGoals();
+    loadToday();
+    loadActions();
+    loadFiles();
+  } catch (err) {
+    showToast(`Delete failed: ${err.message}`, 'error');
   }
 }
 
@@ -554,6 +769,14 @@ async function toggleGoalAgent(goalId, agentName, currentlyActive) {
 // --- Conversational Goal Interview ---
 
 document.getElementById('btn-new-goal').addEventListener('click', () => startGoalInterview());
+document.getElementById('toggle-show-archived').addEventListener('change', (event) => {
+  showArchivedGoals = event.target.checked;
+  openGoalMoreMenuId = null;
+  loadGoals();
+});
+document.getElementById('goal-delete-confirm').addEventListener('click', () => {
+  confirmGoalDelete().catch((err) => showToast(`Delete failed: ${err.message}`, 'error'));
+});
 
 async function startGoalInterview(goalId) {
   goalInterviewActive = true;
@@ -561,6 +784,7 @@ async function startGoalInterview(goalId) {
 
   document.getElementById('goals-list').style.display = 'none';
   document.getElementById('btn-new-goal').style.display = 'none';
+  document.getElementById('goals-filter-bar').style.display = 'none';
   document.getElementById('goal-interview-panel').style.display = 'flex';
   document.getElementById('goal-interview-messages').innerHTML = '';
   document.getElementById('goal-interview-title').textContent = isEdit ? 'Updating goal...' : 'Defining a new goal...';
@@ -596,6 +820,7 @@ function cancelGoalInterview() {
   document.getElementById('goal-interview-panel').style.display = 'none';
   document.getElementById('goals-list').style.display = '';
   document.getElementById('btn-new-goal').style.display = '';
+  document.getElementById('goals-filter-bar').style.display = '';
   document.getElementById('goal-interview-messages').innerHTML = '';
   loadGoals();
 }
@@ -825,18 +1050,28 @@ async function loadMemoryContext() {
           <span class="card-title">${f.label}</span>
           <div>
             <span class="tag tag-primary">user-maintained</span>
-            <button class="btn btn-sm" style="margin-left:8px" onclick="startContextInterview('${f.name}', '${escapeHtml(f.prompt)}')">Talk to Atlas about this</button>
+            <button class="btn btn-sm btn-context-interview-trigger" style="margin-left:8px" data-filename="${escapeHtml(f.name)}" data-prompt="${escapeHtml(f.prompt)}">Talk to Atlas about this</button>
           </div>
         </div>
         <p style="font-size:13px;color:var(--text-secondary);margin-bottom:8px">${f.desc}</p>
         <textarea class="form-textarea" id="ctx-${f.name}" rows="8">${escapeHtml(f.content)}</textarea>
         <div style="margin-top:8px">
-          <button class="btn btn-sm btn-primary" onclick="saveContext('${f.name}')">Save</button>
+          <button class="btn btn-sm btn-primary btn-context-save" data-filename="${escapeHtml(f.name)}">Save</button>
         </div>
       </div>
     `).join('')}
-    <p style="color:var(--text-muted);font-size:13px;margin-top:8px">Don't overthink these — just write naturally. Atlas uses this as background context, and you can update them anytime through the editor or by talking to Atlas.</p>
+    <p style="color:var(--text-muted);font-size:13px;margin-top:8px">Don't overthink these - just write naturally. Atlas uses this as background context, and you can update them anytime through the editor or by talking to Atlas.</p>
   `;
+
+  container.querySelectorAll('.btn-context-interview-trigger').forEach((button) => {
+    button.addEventListener('click', () => {
+      startContextInterview(button.dataset.filename, button.dataset.prompt || '');
+    });
+  });
+
+  container.querySelectorAll('.btn-context-save').forEach((button) => {
+    button.addEventListener('click', () => saveContext(button.dataset.filename));
+  });
 }
 
 async function saveContext(filename) {
@@ -857,6 +1092,7 @@ function startContextInterview(filename, openingPrompt) {
   document.getElementById('context-interview-title').textContent = `Update ${filename.replace('.md', '')}`;
   document.getElementById('context-interview-messages').innerHTML = '';
   document.getElementById('context-interview-proposed').style.display = 'none';
+  document.getElementById('context-interview-input-bar').style.display = 'flex';
   document.getElementById('context-interview-input').value = '';
   document.getElementById('modal-context-interview').classList.add('active');
 
@@ -933,9 +1169,11 @@ document.getElementById('btn-context-accept').addEventListener('click', async ()
   await atlas.context.save(contextInterviewFile, content);
   appendContextInterviewMessage('system', 'Saved successfully.');
   document.getElementById('context-interview-proposed').style.display = 'none';
+  document.getElementById('context-interview-input-bar').style.display = 'flex';
   setTimeout(() => {
     closeModal('modal-context-interview');
     loadMemoryContext();
+    loadMemory();
   }, 1000);
 });
 
@@ -1261,11 +1499,46 @@ async function loadSettings() {
   const activeTab = document.querySelector('#screen-settings .tab.active');
   if (!activeTab) return;
   switch (activeTab.dataset.tab) {
+    case 'settings-style': return loadSettingsStyle();
     case 'settings-integrations': return loadSettingsIntegrations();
     case 'settings-agents': return loadSettingsAgents();
     case 'settings-methodology': return loadSettingsMethodology();
     case 'settings-diagnostics': return loadSettingsDiagnostics();
   }
+}
+
+async function loadSettingsStyle() {
+  const container = document.getElementById('settings-style');
+  let tones = [];
+  try { tones = await atlas.settings.getTones(); } catch {}
+
+  if (tones.length === 0) {
+    container.innerHTML = '<div class="empty-state"><p>No adviser styles found. Atlas will fall back to Direct.</p></div>';
+    return;
+  }
+
+  container.innerHTML = `
+    <div class="card" style="margin-bottom:12px">
+      <div class="card-header">
+        <span class="card-title">Adviser Style</span>
+        <span class="tag tag-primary">${escapeHtml((tones.find((t) => t.selected) || tones[0]).name)}</span>
+      </div>
+      <div class="card-body">
+        Choose how sharp Atlas sounds. This changes delivery, not evidence standards. Updates take effect on your next session.
+      </div>
+    </div>
+    <div class="tone-grid">
+      ${tones.map((tone) => `
+        <div class="tone-card ${tone.selected ? 'selected' : ''}" onclick="selectTone('${tone.id}')">
+          <div class="tone-card-title">
+            <span>${escapeHtml(tone.name)}</span>
+            ${tone.selected ? '<span class="tag tag-success">Selected</span>' : ''}
+          </div>
+          <div class="tone-card-desc">${escapeHtml(tone.description)}</div>
+        </div>
+      `).join('')}
+    </div>
+  `;
 }
 
 async function loadSettingsAgents() {
@@ -1311,7 +1584,7 @@ async function loadSettingsAgents() {
       These are the advisory perspectives Atlas uses to sharpen its thinking for your goals. They're managed automatically during goal creation — you only need to edit them if you want to fine-tune how Atlas thinks.
     </div>
     <div style="margin-bottom:12px">
-      <button class="btn" onclick="createAgentSpec()">New Perspective</button>
+      <button class="btn" onclick="openAgentModalForCreate()">New Perspective</button>
     </div>
     ${specCards || '<div class="empty-state"><p>No perspectives yet. Create a goal and Atlas will set these up automatically.</p></div>'}
   `;
@@ -1321,29 +1594,11 @@ async function editAgentSpec(name) {
   const specs = await atlas.settings.getAgentSpecs();
   const spec = specs.find(s => s.name === name);
   if (!spec) return;
-
-  const content = prompt('Edit perspective spec (Markdown):', spec.content);
-  if (content === null) return;
-
-  await atlas.settings.saveAgentSpec(name, content);
-  showToast(`Perspective "${name}" updated`, 'success');
-  loadSettingsAgents();
+  openAgentModalForEdit(spec.name, spec.content);
 }
 
-async function createAgentSpec() {
-  const name = prompt('Perspective name (lowercase, hyphens, e.g. "negotiation"):');
-  if (!name || !/^[a-z0-9-]+$/.test(name)) {
-    if (name !== null) showToast('Invalid name. Use lowercase letters, numbers, hyphens only.', 'error');
-    return;
-  }
-
-  const existing = await atlas.settings.listAgentFiles();
-  if (existing.includes(name)) {
-    showToast(`Perspective "${name}" already exists`, 'error');
-    return;
-  }
-
-  const template = `# ${name.split('-').map(w => w[0].toUpperCase() + w.slice(1)).join(' ')}
+function buildAgentTemplate(name) {
+  return `# ${name.split('-').map(w => w[0].toUpperCase() + w.slice(1)).join(' ')}
 
 ## Role
 [Describe the advisory perspective]
@@ -1354,32 +1609,42 @@ async function createAgentSpec() {
 
 ## Output Format
 Concise bullet points. Lead with the most actionable item.`;
+}
 
-  const content = prompt('Edit the perspective spec:', template);
-  if (content === null) return;
+function openAgentModalForCreate() {
+  document.getElementById('agent-modal-title').textContent = 'New Perspective';
+  document.getElementById('agent-modal-name').value = '';
+  document.getElementById('agent-modal-name').disabled = false;
+  document.getElementById('agent-modal-content').value = '';
+  document.getElementById('agent-modal-save').dataset.mode = 'create';
+  document.getElementById('agent-modal-save').dataset.originalName = '';
+  document.getElementById('modal-agent-editor').classList.add('active');
+  document.getElementById('agent-modal-name').focus();
+}
 
-  await atlas.settings.saveAgentSpec(name, content);
-  showToast(`Perspective "${name}" created`, 'success');
-  loadSettingsAgents();
+function openAgentModalForEdit(name, content) {
+  document.getElementById('agent-modal-title').textContent = `Edit Perspective: ${name}`;
+  document.getElementById('agent-modal-name').value = name;
+  document.getElementById('agent-modal-name').disabled = true;
+  document.getElementById('agent-modal-content').value = content;
+  document.getElementById('agent-modal-save').dataset.mode = 'edit';
+  document.getElementById('agent-modal-save').dataset.originalName = name;
+  document.getElementById('modal-agent-editor').classList.add('active');
+  document.getElementById('agent-modal-content').focus();
+}
+
+async function createAgentSpec() {
+  openAgentModalForCreate();
+}
+
+function openAgentDeleteModal(name) {
+  document.getElementById('agent-delete-name').textContent = name;
+  document.getElementById('agent-delete-confirm').dataset.name = name;
+  document.getElementById('modal-agent-delete').classList.add('active');
 }
 
 async function deleteAgentSpec(name) {
-  if (!confirm(`Delete perspective "${name}"? This will also remove it from any goals.`)) return;
-
-  await atlas.settings.deleteAgentSpec(name);
-
-  // Remove from all goals that reference it
-  const goals = await atlas.goals.getAll();
-  for (const g of goals) {
-    const agents = g.goal_data?.context_sources?.agents;
-    if (Array.isArray(agents) && agents.includes(name)) {
-      const updated = agents.filter(a => a !== name);
-      await atlas.goals.updateSources(g.id, { ...g.goal_data.context_sources, agents: updated });
-    }
-  }
-
-  showToast(`Perspective "${name}" deleted`, 'success');
-  loadSettingsAgents();
+  openAgentDeleteModal(name);
 }
 
 async function loadSettingsMethodology() {
@@ -1416,7 +1681,7 @@ async function loadSettingsDiagnostics() {
     atlas.settings.getMethodology(),
   ]);
   if (!diag) {
-    container.innerHTML = '<div class="empty-state"><p>No diagnostics yet. Generate a brief or start a chat session first.</p></div>';
+    container.innerHTML = '<div class="empty-state"><p>No diagnostics yet. Diagnostics appear after Atlas assembles context for a brief or session.</p></div>';
     return;
   }
   const pct = Math.round((diag.totalTokens / diag.tokenCeiling) * 100);
@@ -1488,13 +1753,29 @@ function closeModal(id) {
       if (!confirm('You have unsaved changes. Close without saving?')) return;
     }
   }
+  if (id === 'modal-goal-delete') {
+    pendingGoalDelete = null;
+  }
   document.getElementById(id).classList.remove('active');
 }
 
+window.startContextInterview = startContextInterview;
+window.closeModal = closeModal;
+window.exportBriefPDF = exportBriefPDF;
+
 document.querySelectorAll('.modal-overlay').forEach((overlay) => {
   overlay.addEventListener('click', (e) => {
-    if (e.target === overlay) overlay.classList.remove('active');
+    if (e.target === overlay) closeModal(overlay.id);
   });
+});
+
+document.addEventListener('click', (event) => {
+  if (!event.target.closest('[data-goal-more-menu]') && !event.target.closest('[data-goal-more-button]')) {
+    if (openGoalMoreMenuId) {
+      openGoalMoreMenuId = null;
+      loadGoals();
+    }
+  }
 });
 
 // === PDF Export ===
@@ -1556,43 +1837,76 @@ document.getElementById('btn-generate-reflection').addEventListener('click', asy
 async function renderContextSummary() {
   const panel = document.getElementById('today-context-summary');
   const badges = document.getElementById('today-context-badges');
-  const diag = await atlas.settings.getDiagnostics();
-
+  const [diag, files] = await Promise.all([
+    atlas.settings.getDiagnostics(),
+    atlas.files.list().catch(() => []),
+  ]);
   const sources = [
-    { key: 'gmail', label: 'Gmail', icon: '✉' },
-    { key: 'calendar', label: 'Calendar', icon: '📅' },
-    { key: 'files', label: 'Files', icon: '📄' },
-    { key: 'memory', label: 'Memory', icon: '🧠' },
-    { key: 'web_search', label: 'Web Search', icon: '🔍' },
+    { key: 'gmail', label: 'Gmail', icon: 'Mail' },
+    { key: 'calendar', label: 'Calendar', icon: 'Cal' },
+    { key: 'files', label: 'Files', icon: 'File' },
+    { key: 'memory', label: 'Recent memory', icon: 'Memo' },
+    { key: 'web_search', label: 'Web search', icon: 'Web' },
   ];
-
-  // Check integration availability
   let googleConfigured = false;
   try { googleConfigured = await atlas.settings.isGoogleConfigured(); } catch {}
-
   const sourceStatus = {};
   if (diag && diag.sourcePolicy) {
     for (const s of sources) {
       sourceStatus[s.key] = diag.sourcePolicy[s.key];
     }
   }
-
+  const describeSource = (source) => {
+    const inContext = !!sourceStatus[source.key];
+    if (source.key === 'gmail' || source.key === 'calendar') {
+      if (!googleConfigured) {
+        return { cls: 'inactive', text: `${source.label}: not connected` };
+      }
+      return {
+        cls: inContext ? 'active' : 'inactive',
+        text: inContext
+          ? `${source.label}: connected, in context`
+          : `${source.label}: connected, not used for current goals`,
+      };
+    }
+    if (source.key === 'files') {
+      if (!files || files.length === 0) {
+        return {
+          cls: 'inactive',
+          text: inContext ? 'Files: enabled, no files loaded' : 'Files: no files loaded',
+        };
+      }
+      return {
+        cls: inContext ? 'active' : 'inactive',
+        text: inContext ? 'Files: available, in context' : 'Files: available, not used for current goals',
+      };
+    }
+    if (source.key === 'memory') {
+      return {
+        cls: inContext ? 'active' : 'inactive',
+        text: inContext ? 'Recent memory: in context' : 'Recent memory: not used for current goals',
+      };
+    }
+    return {
+      cls: inContext ? 'active' : 'inactive',
+      text: inContext
+        ? `${source.label}: available, in context`
+        : `${source.label}: available, not used for current goals`,
+    };
+  };
   let badgesHtml = sources.map((s) => {
-    const active = sourceStatus[s.key];
-    const unavailable = (s.key === 'gmail' || s.key === 'calendar') && !googleConfigured;
-    const cls = unavailable ? 'inactive' : active ? 'active' : 'inactive';
-    const label = unavailable ? `${s.label} (not configured)` : active ? s.label : `${s.label} (excluded)`;
-    return `<div class="context-badge ${cls}"><span class="badge-dot"></span>${s.icon} ${label}</div>`;
+    const state = describeSource(s);
+    return `<div class="context-badge ${state.cls}"><span class="badge-dot"></span>${s.icon} ${state.text}</div>`;
   }).join('');
-
-  // Perspectives
+  if (!diag) {
+    badgesHtml = `<div style="width:100%;font-size:13px;color:var(--text-secondary);margin-bottom:8px">Source usage appears after Atlas assembles context for a brief or session.</div>${badgesHtml}`;
+  }
   if (diag && diag.loadedAgents) {
     const perspectiveBadges = diag.loadedAgents.map(a =>
       `<div class="context-badge active"><span class="badge-dot"></span>${a}</div>`
     ).join('');
     badgesHtml += `<div style="width:100%;margin-top:8px;font-size:12px;color:var(--text-secondary)">Perspectives:</div>${perspectiveBadges}`;
   }
-
   badges.innerHTML = badgesHtml;
   panel.style.display = 'flex';
   panel.style.flexDirection = 'column';
@@ -1600,13 +1914,50 @@ async function renderContextSummary() {
 
 // === Engine Settings ===
 
+async function selectTone(name) {
+  try {
+    const result = await atlas.settings.setTone(name);
+    const label = result?.tone?.name || name;
+    showToast(`Adviser style updated to ${label}. Takes effect on your next session.`, 'success');
+    await loadSettingsStyle();
+  } catch (err) {
+    showToast(`Failed to update adviser style: ${err.message}`, 'error');
+  }
+}
+
 async function loadSettingsIntegrations() {
   const container = document.getElementById('settings-integrations');
   const googleConfigured = await atlas.settings.isGoogleConfigured();
   let engines = [];
   try { engines = await atlas.settings.getEngines(); } catch {}
 
-  const activeEngine = engines.find((e) => e.active) || { name: 'claude' };
+  const activeEngine = engines.find((e) => e.active) || { name: 'claude', model: null, available: false, capabilities: {} };
+  const capabilityLabel = (engine) => {
+    const caps = [];
+    if (engine.capabilities?.streaming) caps.push('streaming');
+    if (engine.capabilities?.webSearch) caps.push('web search');
+    if (engine.capabilities?.toolUse) caps.push('tool use');
+    if (engine.capabilities?.localCli) caps.push('local CLI');
+    return caps.length > 0 ? caps.join(' - ') : 'basic response mode';
+  };
+  const engineCards = engines.map((e) => `
+    <div class="card" style="margin-top:12px">
+      <div class="card-header">
+        <span class="card-title">${escapeHtml(e.name)}</span>
+        <div>
+          <span class="tag ${e.available ? 'tag-success' : 'tag-warning'}">${e.available ? 'Available' : 'Unavailable'}</span>
+          ${e.active ? '<span class="tag tag-primary" style="margin-left:6px">Selected</span>' : ''}
+        </div>
+      </div>
+      <div class="card-body">
+        <div style="margin-bottom:8px;color:var(--text-secondary)">${escapeHtml(capabilityLabel(e))}</div>
+        ${e.model ? `<div style="margin-bottom:8px;font-size:13px;color:var(--text-secondary)">Model: <code>${escapeHtml(e.model)}</code></div>` : ''}
+        <div class="btn-group">
+          <button class="btn btn-sm ${e.active ? 'btn-primary' : ''}" onclick="switchEngine('${e.name}')"${e.active ? ' disabled' : ''}>${e.active ? 'Selected' : 'Use this engine'}</button>
+        </div>
+      </div>
+    </div>
+  `).join('');
 
   container.innerHTML = `
     <div class="card">
@@ -1615,7 +1966,7 @@ async function loadSettingsIntegrations() {
         <span class="tag ${googleConfigured ? 'tag-success' : 'tag-warning'}">${googleConfigured ? 'Connected' : 'Not connected'}</span>
       </div>
       <div class="card-body">${googleConfigured
-        ? 'Google services are connected. Calendar and email data will be included in sessions and briefs.'
+        ? "Google services are connected and available. Whether Gmail or Calendar are used in a brief or session depends on the active goals' source settings."
         : 'Not connected. Run the terminal app (<code>npm start</code>) to complete the OAuth setup flow.'}</div>
     </div>
     <div class="card">
@@ -1625,11 +1976,12 @@ async function loadSettingsIntegrations() {
       </div>
       <div class="card-body">
         <p style="margin-bottom:8px">Current engine: <strong>${escapeHtml(activeEngine.name)}</strong></p>
-        ${engines.length > 1 ? `<div class="btn-group">${engines.map((e) =>
-          `<button class="btn btn-sm ${e.active ? 'btn-primary' : ''}" onclick="switchEngine('${e.name}')"${e.active ? ' disabled' : ''}>${escapeHtml(e.name)}</button>`
-        ).join('')}</div>` : '<p style="color:var(--text-secondary);font-size:12px">Uses Claude Code CLI. Only one engine currently available.</p>'}
+        ${activeEngine.model ? `<p style="margin-bottom:8px">Pinned model: <code>${escapeHtml(activeEngine.model)}</code></p>` : ''}
+        <p style="color:var(--text-secondary);margin-bottom:8px">Atlas uses one engine at a time. Switching changes which local CLI Atlas uses for briefs, sessions, chat, and context interviews.</p>
+        <div style="font-size:13px;color:var(--text-secondary)">Selected engine capabilities: ${escapeHtml(capabilityLabel(activeEngine))}</div>
       </div>
     </div>
+    ${engines.length > 0 ? engineCards : '<div class="empty-state"><p>No engines detected.</p></div>'}
   `;
 }
 
@@ -1637,7 +1989,8 @@ async function switchEngine(name) {
   try {
     await atlas.settings.setEngine(name);
     showToast(`Engine switched to ${name}`, 'success');
-    loadSettingsIntegrations();
+    await loadSettingsIntegrations();
+    await runHealthCheck();
   } catch (err) {
     showToast(`Failed to switch engine: ${err.message}`, 'error');
   }
@@ -1844,7 +2197,7 @@ async function runHealthCheck() {
     bar.style.display = 'flex';
 
     if (!status.ai.ok) {
-      showToast('AI engine (Claude CLI) not found. Briefs, sessions, and chat require it. Other features still work.', 'warning', 8000);
+      showToast('The active AI engine is not available. Briefs, sessions, and chat require a working engine. Other features still work.', 'warning', 8000);
     }
   } catch {}
 }
@@ -1984,7 +2337,7 @@ const GUIDE_SECTIONS = [
   {
     id: 'privacy',
     title: 'Privacy and Data',
-    content: `<p>Atlas runs locally as a desktop app. Your conversations are processed through the AI engine (Claude CLI) which runs on your machine. Session data, goals, actions, and memory are stored in your Supabase database. Email and calendar data is fetched directly from your Google account using credentials stored locally — Atlas does not send your email data to third parties.</p>
+    content: `<p>Atlas runs locally as a desktop app. Your conversations are processed through the currently selected AI engine, which Atlas runs through the local CLI integration. Session data, goals, actions, and memory are stored in your Supabase database. Email and calendar data is fetched directly from your Google account using credentials stored locally — Atlas does not send your email data to third parties.</p>
 <p>Perspective files, user context files, and the methodology are stored as local files on your computer.</p>`
   },
   {
@@ -2157,3 +2510,43 @@ async function init() {
 }
 
 init();
+
+
+document.getElementById('agent-modal-save').addEventListener('click', async () => {
+  const mode = document.getElementById('agent-modal-save').dataset.mode;
+  const name = document.getElementById('agent-modal-name').value.trim();
+  let content = document.getElementById('agent-modal-content').value;
+  if (!name || !/^[a-z0-9-]+$/.test(name)) {
+    showToast('Invalid name. Use lowercase letters, numbers, hyphens only.', 'error');
+    return;
+  }
+  if (!content.trim()) {
+    content = buildAgentTemplate(name);
+    document.getElementById('agent-modal-content').value = content;
+  }
+  const existing = await atlas.settings.listAgentFiles();
+  if (mode === 'create' && existing.includes(name)) {
+    showToast(`Perspective "${name}" already exists`, 'error');
+    return;
+  }
+  await atlas.settings.saveAgentSpec(name, content);
+  closeModal('modal-agent-editor');
+  showToast(`Perspective "${name}" ${mode === 'create' ? 'created' : 'updated'}`, 'success');
+  loadSettingsAgents();
+});
+document.getElementById('agent-delete-confirm').addEventListener('click', async () => {
+  const name = document.getElementById('agent-delete-confirm').dataset.name;
+  if (!name) return;
+  await atlas.settings.deleteAgentSpec(name);
+  const goals = await atlas.goals.getAll();
+  for (const g of goals) {
+    const agents = g.goal_data?.context_sources?.agents;
+    if (Array.isArray(agents) && agents.includes(name)) {
+      const updated = agents.filter(a => a !== name);
+      await atlas.goals.updateSources(g.id, { ...g.goal_data.context_sources, agents: updated });
+    }
+  }
+  closeModal('modal-agent-delete');
+  showToast(`Perspective "${name}" deleted`, 'success');
+  loadSettingsAgents();
+});

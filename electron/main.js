@@ -35,6 +35,8 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  process.env.ATLAS_RUNTIME_DIR = path.join(app.getPath('userData'), 'runtime');
+
   // Show window immediately so user sees something right away
   createWindow();
   registerIPC();
@@ -74,6 +76,10 @@ app.on('window-all-closed', () => {
 // --- IPC Registration ---
 
 function registerIPC() {
+  const logTiming = (label, startedAt) => {
+    console.log(`[Timing] ${label} in ${Date.now() - startedAt}ms`);
+  };
+
   // --- DB: Goals ---
   ipcMain.handle('goals:getActive', async () => {
     const goals = await db.getActiveGoals();
@@ -85,9 +91,14 @@ function registerIPC() {
     return goals;
   });
   ipcMain.handle('goals:getAll', () => db.getAllGoals());
+  ipcMain.handle('goals:getArchived', () => db.getArchivedGoals());
   ipcMain.handle('goals:get', (_, id) => db.getGoal(id));
   ipcMain.handle('goals:save', (_, goal) => db.saveGoal(goal));
   ipcMain.handle('goals:updateStatus', (_, id, status) => db.updateGoalStatus(id, status));
+  ipcMain.handle('goals:archive', (_, id) => db.archiveGoal(id));
+  ipcMain.handle('goals:unarchive', (_, id) => db.unarchiveGoal(id));
+  ipcMain.handle('goals:countLinked', (_, goalId) => db.countGoalLinkedItems(goalId));
+  ipcMain.handle('goals:deleteCascade', (_, goalId, level) => db.deleteGoalCascade(goalId, level));
 
   // --- DB: Actions ---
   ipcMain.handle('actions:getOpen', () => db.getOpenActions());
@@ -143,6 +154,7 @@ function registerIPC() {
 
   // --- AI: Brief ---
   ipcMain.handle('brief:generate', async (_, options) => {
+    const briefStartedAt = Date.now();
     const { getActiveGoals } = db;
     const { buildSystemPrompt, callClaude } = require('../src/orchestrator');
     const { getOpenActions, getOverdueActions } = db;
@@ -153,7 +165,9 @@ function registerIPC() {
     console.log('[Brief] Goal statuses:', allGoals.map(g => `${g.id}: ${g.status}`).join(', '));
     if (goals.length === 0) return null;
 
+    const promptStartedAt = Date.now();
     const systemPrompt = await buildSystemPrompt(goals, options || {});
+    logTiming('System prompt built', promptStartedAt);
     console.log('[Brief] System prompt length:', systemPrompt.length);
     const openActions = await getOpenActions();
     const overdueActions = await getOverdueActions();
@@ -187,13 +201,14 @@ ${numberedSections}
 
 Keep it scannable. Under 3 minutes to read. Reference specific past events and commitments.`;
 
-    console.log('[Brief] Calling Claude CLI...');
+    console.log('[Brief] Calling active AI engine...');
     try {
-      const result = await callClaude(briefPrompt, systemPrompt);
+      const result = await callClaude(briefPrompt, systemPrompt, { label: 'Brief generated' });
       console.log('[Brief] Response length:', result ? result.length : 0);
+      logTiming('Brief generated', briefStartedAt);
       return result;
     } catch (err) {
-      console.error('[Brief] Claude CLI error:', err.message);
+      console.error('[Brief] Active AI engine error:', err.message);
       throw err;
     }
   });
@@ -204,11 +219,14 @@ Keep it scannable. Under 3 minutes to read. Reference specific past events and c
   let chatSystemPrompt = '';
 
   ipcMain.handle('chat:start', async (_, options) => {
+    const chatStartTime = Date.now();
     const goals = await db.getActiveGoals();
     if (goals.length === 0) return { error: 'No active goals. Create a goal first.' };
 
     const { buildSystemPrompt, callClaude, checkUserContextFiles } = require('../src/orchestrator');
+    const promptStartedAt = Date.now();
     chatSystemPrompt = await buildSystemPrompt(goals, options || {});
+    logTiming('System prompt built', promptStartedAt);
     chatHistory = [];
     chatSession = await db.createSession('advisory');
 
@@ -258,7 +276,9 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
 
     let opening = null;
     try {
-      opening = await callClaude(openerPrompt, chatSystemPrompt);
+      const openingStartedAt = Date.now();
+      opening = await callClaude(openerPrompt, chatSystemPrompt, { label: 'Session opening generated' });
+      logTiming('Session opening generated', openingStartedAt);
       chatHistory.push({ role: 'Atlas', content: opening });
 
       // Increment follow-up counts for overdue/stalled
@@ -269,6 +289,7 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
       console.error('[Chat] Opening generation failed:', err.message);
     }
 
+    logTiming('Session start completed', chatStartTime);
     return { sessionId: chatSession.id, opening };
   });
 
@@ -615,7 +636,7 @@ Be direct. Under 2 minutes to read. No fluff.`;
   });
 
   // --- Engine Info ---
-  ipcMain.handle('settings:getEngines', () => {
+  ipcMain.handle('settings:getEngines', async () => {
     const { getAvailableEngines } = require('../src/orchestrator');
     return getAvailableEngines();
   });
@@ -623,6 +644,18 @@ Be direct. Under 2 minutes to read. No fluff.`;
   ipcMain.handle('settings:setEngine', (_, name) => {
     const { setEngine } = require('../src/orchestrator');
     setEngine(name);
+    return { ok: true, activeEngine: name };
+  });
+
+  ipcMain.handle('settings:getTones', () => {
+    const { getAvailableTones } = require('../src/orchestrator');
+    return getAvailableTones();
+  });
+
+  ipcMain.handle('settings:setTone', (_, name) => {
+    const { setSelectedTone } = require('../src/orchestrator');
+    const tone = setSelectedTone(name);
+    return { ok: true, tone };
   });
 
   ipcMain.handle('settings:getAgentSpecs', () => {
@@ -697,11 +730,14 @@ Be direct. Under 2 minutes to read. No fluff.`;
 
     // AI engine
     try {
-      const { getEngine } = require('../src/orchestrator');
+      const { getEngine, getActiveEngineName } = require('../src/orchestrator');
       const engine = getEngine();
       const available = await engine.isAvailable();
-      status.ai = available ? { ok: true, label: 'connected' } : { ok: false, label: 'not found' };
-    } catch { status.ai = { ok: false, label: 'not found' }; }
+      const name = getActiveEngineName();
+      status.ai = available ? { ok: true, label: `${name} ready` } : { ok: false, label: `${name} unavailable` };
+    } catch {
+      status.ai = { ok: false, label: 'engine unavailable' };
+    }
 
     // Database
     try {
@@ -826,7 +862,7 @@ After the user confirms, your response MUST start with "GOAL_READY" on its own l
   });
 
   ipcMain.handle('interview:complete', async () => {
-    const { callClaude, generateGoalId, DEFAULT_CONTEXT_SOURCES } = require('../src/orchestrator');
+    const { callClaude, generateGoalId, DEFAULT_CONTEXT_SOURCES, mapDirectnessToTone, setSelectedTone } = require('../src/orchestrator');
 
     const transcript = interviewHistory.map((m) => `${m.role}: ${m.content}`).join('\n\n');
 
@@ -855,6 +891,9 @@ Return ONLY valid JSON. No explanation.`;
     if (!match) throw new Error('Failed to structure goal from conversation');
 
     const goalData = JSON.parse(match[0]);
+    goalData.atlas_directness = goalData.atlas_directness || 3;
+    setSelectedTone(mapDirectnessToTone(goalData.atlas_directness));
+
     // Assign perspectives based on goal type, create missing perspective files
     if (!goalData.context_sources) {
       const { AGENT_DEFAULTS_BY_TYPE, perspectiveExists, generatePerspective } = require('../src/orchestrator');
