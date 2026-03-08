@@ -166,6 +166,31 @@ async function loadToday() {
   document.getElementById('stat-actions').textContent = actions.length;
   document.getElementById('stat-overdue').textContent = overdue.length;
 
+  const todaySessionBtn = document.getElementById('btn-today-session');
+  const briefSessionBtn = document.getElementById('btn-brief-session');
+
+  if (goals.length === 0) {
+    if (todaySessionBtn) {
+      todaySessionBtn.textContent = 'Create a Goal';
+      todaySessionBtn.setAttribute('onclick', "navigateTo('goals')");
+      todaySessionBtn.classList.add('btn-primary');
+    }
+    if (briefSessionBtn) {
+      briefSessionBtn.textContent = 'Create a Goal';
+      briefSessionBtn.setAttribute('onclick', "navigateTo('goals')");
+    }
+  } else {
+    if (todaySessionBtn) {
+      todaySessionBtn.textContent = 'Start Session';
+      todaySessionBtn.setAttribute('onclick', "navigateTo('chat')");
+      todaySessionBtn.classList.remove('btn-primary');
+    }
+    if (briefSessionBtn) {
+      briefSessionBtn.textContent = 'Start Session';
+      briefSessionBtn.setAttribute('onclick', "navigateTo('chat')");
+    }
+  }
+
   const badge = document.getElementById('overdue-badge');
   if (overdue.length > 0) {
     badge.textContent = overdue.length;
@@ -339,6 +364,10 @@ document.getElementById('btn-chat-end').addEventListener('click', async () => {
   document.getElementById('chat-status').textContent = 'Session ended.';
 });
 
+atlas.chat.onProcessingStatus((status) => {
+  document.getElementById('chat-status').textContent = status;
+});
+
 document.getElementById('btn-chat-send').addEventListener('click', sendChatMessage);
 document.getElementById('chat-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChatMessage(); }
@@ -491,18 +520,37 @@ function appendChatMessage(containerId, role, content) {
 function showTypingIndicator(containerId) {
   const messages = document.getElementById(containerId);
   const div = document.createElement('div');
-  div.className = 'chat-message atlas typing';
+  div.className = 'chat-message atlas typing-indicator';
   div.innerHTML = `
-    <div class="msg-role">Atlas<span class="msg-time">${timeNow()}</span></div>
-    <div class="msg-content"><div class="typing-indicator"><span></span><span></span><span></span></div></div>
+    <div class="msg-role">Atlas</div>
+    <div class="msg-content"><span class="typing-dots">
+      <span>.</span><span>.</span><span>.</span>
+    </span><span class="typing-elapsed" style="display:none;margin-left:8px;font-size:12px;color:var(--text-muted)"></span></div>
   `;
   messages.appendChild(div);
   messages.scrollTop = messages.scrollHeight;
+
+  // Show elapsed time after 5 seconds
+  const startTime = Date.now();
+  div._elapsedInterval = setInterval(() => {
+    const elapsed = Math.round((Date.now() - startTime) / 1000);
+    if (elapsed >= 5) {
+      const elapsedEl = div.querySelector('.typing-elapsed');
+      if (elapsedEl) {
+        elapsedEl.style.display = '';
+        elapsedEl.textContent = `${elapsed}s`;
+      }
+    }
+  }, 1000);
+
   return div;
 }
 
 function removeTypingIndicator(el) {
-  if (el && el.parentNode) el.parentNode.removeChild(el);
+  if (el) {
+    if (el._elapsedInterval) clearInterval(el._elapsedInterval);
+    el.remove();
+  }
 }
 
 // === GOALS ===
@@ -515,8 +563,11 @@ async function loadGoals() {
   const goals = await atlas.goals.getAll();
   const container = document.getElementById('goals-list');
   const archiveToggle = document.getElementById('toggle-show-archived');
-  if (archiveToggle) archiveToggle.checked = showArchivedGoals;
   const archivedCount = goals.filter((g) => g.status === 'archived').length;
+  const archiveToggleRow = archiveToggle ? archiveToggle.closest('.checkbox-row') : null;
+  if (archivedCount === 0) showArchivedGoals = false;
+  if (archiveToggle) archiveToggle.checked = showArchivedGoals;
+  if (archiveToggleRow) archiveToggleRow.style.display = archivedCount > 0 ? '' : 'none';
   const visibleGoals = [...goals]
     .filter((g) => showArchivedGoals || g.status !== 'archived')
     .sort((a, b) => {
@@ -525,7 +576,7 @@ async function loadGoals() {
     });
 
   if (goals.length === 0) {
-    container.innerHTML = '<div class="empty-state"><p>No goals defined yet. Click "New Goal" to get started.</p></div>';
+    container.innerHTML = `<div class="empty-state"><p>Goals are the foundation of Atlas. Everything - briefs, sessions, memory, actions - revolves around your active goals.</p><p>Click "New Goal" to have a conversation with Atlas about what you're working toward. Atlas will help you sharpen a vague idea into something specific and actionable.</p></div>`;
     return;
   }
 
@@ -712,8 +763,9 @@ async function openGoalDeleteModal(goalId) {
     ]);
     if (!goal) return;
 
-    pendingGoalDelete = { id: goalId, title: goal.title, counts };
+    pendingGoalDelete = { id: goalId, title: goal.title, counts, isArchived: goal.status === 'archived' };
     document.getElementById('goal-delete-title').textContent = goal.title;
+    document.getElementById('goal-delete-summary').textContent = `This will delete 1 goal, ${counts.entries || 0} ${(counts.entries || 0) === 1 ? 'entry' : 'entries'}, ${counts.actions || 0} ${(counts.actions || 0) === 1 ? 'action' : 'actions'}, and ${counts.files || 0} ${(counts.files || 0) === 1 ? 'file' : 'files'}.`;
     document.getElementById('goal-delete-counts').innerHTML = `
       <li>1 goal record</li>
       <li>${counts.entries || 0} memory entr${(counts.entries || 0) === 1 ? 'y' : 'ies'} linked to this goal</li>
@@ -721,9 +773,7 @@ async function openGoalDeleteModal(goalId) {
       <li>${counts.overrides || 0} override${(counts.overrides || 0) === 1 ? '' : 's'} linked to this goal</li>
       <li>${counts.files || 0} file association${(counts.files || 0) === 1 ? '' : 's'}</li>
     `;
-
-    const defaultOption = document.querySelector('input[name="goal-delete-level"][value="goal_only"]');
-    if (defaultOption) defaultOption.checked = true;
+    document.getElementById('goal-archive-confirm').style.display = goal.status === 'archived' ? 'none' : '';
     document.getElementById('modal-goal-delete').classList.add('active');
   } catch (err) {
     showToast(`Delete preview failed: ${err.message}`, 'error');
@@ -733,12 +783,10 @@ async function openGoalDeleteModal(goalId) {
 async function confirmGoalDelete() {
   try {
     if (!pendingGoalDelete) return;
-    const selected = document.querySelector('input[name="goal-delete-level"]:checked');
-    const level = selected ? selected.value : 'goal_only';
-    await atlas.goals.deleteCascade(pendingGoalDelete.id, level);
+    await atlas.goals.deleteCascade(pendingGoalDelete.id, 'goal_and_memory_and_files');
     closeModal('modal-goal-delete');
     pendingGoalDelete = null;
-    showToast('Goal deleted permanently', 'success');
+    showToast('Goal and all linked data deleted.', 'success');
     loadGoals();
     loadToday();
     loadActions();
@@ -746,6 +794,18 @@ async function confirmGoalDelete() {
   } catch (err) {
     showToast(`Delete failed: ${err.message}`, 'error');
   }
+}
+
+async function confirmGoalArchive() {
+  if (!pendingGoalDelete) return;
+  const goalId = pendingGoalDelete.id;
+  closeModal('modal-goal-delete');
+  pendingGoalDelete = null;
+  await atlas.goals.archive(goalId);
+  openGoalMoreMenuId = null;
+  showToast('Goal archived. You can restore it later.', 'success');
+  loadGoals();
+  loadToday();
 }
 
 async function toggleGoalAgent(goalId, agentName, currentlyActive) {
@@ -773,6 +833,9 @@ document.getElementById('toggle-show-archived').addEventListener('change', (even
   showArchivedGoals = event.target.checked;
   openGoalMoreMenuId = null;
   loadGoals();
+});
+document.getElementById('goal-archive-confirm').addEventListener('click', () => {
+  confirmGoalArchive().catch((err) => showToast(`Archive failed: ${err.message}`, 'error'));
 });
 document.getElementById('goal-delete-confirm').addEventListener('click', () => {
   confirmGoalDelete().catch((err) => showToast(`Delete failed: ${err.message}`, 'error'));
@@ -816,6 +879,11 @@ async function startGoalEdit(goalId) {
 }
 
 function cancelGoalInterview() {
+  if (goalInterviewExchanges > 0) {
+    if (!confirm('You have unsaved progress. If you leave now, this conversation will be lost. Cancel anyway?')) {
+      return;
+    }
+  }
   goalInterviewActive = false;
   document.getElementById('goal-interview-panel').style.display = 'none';
   document.getElementById('goals-list').style.display = '';
@@ -843,6 +911,7 @@ function appendInterviewMessage(role, content) {
   interviewLastRole = role;
   messages.appendChild(div);
   messages.scrollTop = messages.scrollHeight;
+  return div;
 }
 
 document.getElementById('btn-goal-interview-send').addEventListener('click', sendGoalInterviewMessage);
@@ -861,15 +930,74 @@ async function sendGoalInterviewMessage() {
 
   appendInterviewMessage('user', message);
   const typingEl = showTypingIndicator('goal-interview-messages');
+  let streamingEl = null;
+  let streamingContent = '';
+  let streamCreated = false;
+
+  atlas.interview.removeStreamListeners();
+  atlas.interview.onStreamChunk((chunk) => {
+    streamingContent += chunk;
+    if (!streamingEl) {
+      removeTypingIndicator(typingEl);
+      streamingEl = appendInterviewMessage('atlas', '');
+      streamingEl.classList.add('streaming');
+      streamCreated = true;
+    }
+    const contentEl = streamingEl.querySelector('.msg-content');
+    if (contentEl) {
+      contentEl.innerHTML = renderMarkdown(streamingContent);
+      contentEl.classList.add('streaming-cursor');
+    }
+  });
+
+  atlas.interview.onStreamEnd(() => {
+    if (!streamingEl) return;
+    const contentEl = streamingEl.querySelector('.msg-content');
+    if (contentEl) contentEl.classList.remove('streaming-cursor');
+    streamingEl.classList.remove('streaming');
+  });
+
+  atlas.interview.onStreamError(() => {
+    removeTypingIndicator(typingEl);
+    if (streamingEl) {
+      streamingEl.remove();
+      streamingEl = null;
+    }
+  });
 
   try {
-    const result = await atlas.interview.send(message);
+    let result;
+    try {
+      result = await atlas.interview.sendStreaming(message);
+      if (result && result.error) throw new Error(result.error);
+    } catch {
+      atlas.interview.removeStreamListeners();
+      removeTypingIndicator(typingEl);
+      if (streamingEl) {
+        streamingEl.remove();
+        streamingEl = null;
+      }
+      streamCreated = false;
+      streamingContent = '';
+      result = await atlas.interview.send(message);
+    }
+
+    atlas.interview.removeStreamListeners();
     removeTypingIndicator(typingEl);
-    appendInterviewMessage('atlas', result.response);
+    if (streamCreated && streamingEl) {
+      const contentEl = streamingEl.querySelector('.msg-content');
+      if (contentEl) {
+        contentEl.innerHTML = renderMarkdown(result.response);
+        contentEl.classList.remove('streaming-cursor');
+      }
+      streamingEl.classList.remove('streaming');
+    } else {
+      appendInterviewMessage('atlas', result.response);
+    }
     goalInterviewExchanges++;
 
     // Show manual save button after 2+ exchanges as a fallback
-    if (goalInterviewExchanges >= 2) {
+    if (goalInterviewExchanges >= 1) {
       document.getElementById('btn-goal-interview-save').style.display = '';
     }
 
@@ -897,6 +1025,7 @@ async function sendGoalInterviewMessage() {
       return;
     }
   } catch (err) {
+    atlas.interview.removeStreamListeners();
     removeTypingIndicator(typingEl);
     appendInterviewMessage('system', `Error: ${err.message}`);
   }
@@ -966,7 +1095,7 @@ async function loadActions() {
   const today = new Date().toISOString().split('T')[0];
 
   if (actions.length === 0) {
-    container.innerHTML = '<div class="empty-state"><p>No actions yet. They\'ll appear here after your advisory sessions when you commit to specific next steps.</p></div>';
+    container.innerHTML = `<div class="empty-state"><p>Actions are commitments you make during sessions with Atlas. When you agree to do something specific — finish a task by Friday, research three options this week, or follow up with someone tomorrow — Atlas captures it as a trackable action item with a due date.</p><p>They'll appear here after your first session with Atlas.</p></div>`;
     return;
   }
 
@@ -1033,7 +1162,7 @@ async function loadMemoryContext() {
 
   const files = [
     { name: 'IDENTITY.md', label: 'Identity', content: ctx.identity, desc: 'Tell Atlas who you are so it can personalise advice. Example: your name, where you live, your professional background, and how you prefer to communicate (direct, detailed, casual).', prompt: 'Tell me about yourself — your background, where you\'re based, what you do.' },
-    { name: 'SITUATION.md', label: 'Situation', content: ctx.situation, desc: 'Describe your current reality so Atlas understands your constraints. Example: employment status, approximate financial runway, living situation, and any major life factors affecting your goals.', prompt: 'What\'s your current situation? Employment, finances, anything I should know.' },
+    { name: 'SITUATION.md', label: 'Situation', content: ctx.situation, desc: 'Describe your current reality so Atlas understands your constraints. For example: what\'s happening in your life right now, what limits your time or energy, and what major factors Atlas should know about.', prompt: 'What\'s your current situation? What\'s happening in your life right now that I should know about?' },
     { name: 'PREFERENCES.md', label: 'Preferences', content: ctx.preferences, desc: 'Tell Atlas how to work with you. Example: how blunt it should be, your typical working hours, any time blocks it should respect, and how detailed you want morning briefs.', prompt: 'How do you want me to work with you? How direct should I be?' },
   ];
 
@@ -1094,7 +1223,11 @@ function startContextInterview(filename, openingPrompt) {
   document.getElementById('context-interview-proposed').style.display = 'none';
   document.getElementById('context-interview-input-bar').style.display = 'flex';
   document.getElementById('context-interview-input').value = '';
+  document.getElementById('btn-context-save-now').disabled = false;
+  document.getElementById('btn-context-interview-send').disabled = false;
   document.getElementById('modal-context-interview').classList.add('active');
+
+  appendContextInterviewMessage('system', 'Chat with Atlas to update this file. When you\'re done, click "Draft Update" to see proposed changes. Nothing is saved until you click "Accept & Save".');
 
   // Send opening message from Atlas
   const typingEl = showTypingIndicator('context-interview-messages');
@@ -1122,12 +1255,95 @@ function appendContextInterviewMessage(role, content) {
   `;
   messages.appendChild(div);
   messages.scrollTop = messages.scrollHeight;
+  return div;
 }
 
 document.getElementById('btn-context-interview-send').addEventListener('click', sendContextInterviewMessage);
 document.getElementById('context-interview-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendContextInterviewMessage(); }
 });
+
+function showContextInterviewProposal(content) {
+  document.getElementById('context-proposed-content').textContent = content;
+  document.getElementById('context-interview-proposed').style.display = 'block';
+  document.getElementById('context-interview-input-bar').style.display = 'none';
+}
+
+async function requestContextInterview(message, history) {
+  const typingEl = showTypingIndicator('context-interview-messages');
+  let streamingEl = null;
+  let streamingContent = '';
+  let streamCreated = false;
+
+  atlas.context.removeStreamListeners();
+  atlas.context.onStreamChunk((chunk) => {
+    streamingContent += chunk;
+    if (!streamingEl) {
+      removeTypingIndicator(typingEl);
+      streamingEl = appendContextInterviewMessage('atlas', '');
+      streamingEl.classList.add('streaming');
+      streamCreated = true;
+    }
+    const contentEl = streamingEl.querySelector('.msg-content');
+    if (contentEl) {
+      contentEl.innerHTML = renderMarkdown(streamingContent);
+      contentEl.classList.add('streaming-cursor');
+    }
+  });
+
+  atlas.context.onStreamEnd(() => {
+    if (!streamingEl) return;
+    const contentEl = streamingEl.querySelector('.msg-content');
+    if (contentEl) contentEl.classList.remove('streaming-cursor');
+    streamingEl.classList.remove('streaming');
+  });
+
+  atlas.context.onStreamError(() => {
+    removeTypingIndicator(typingEl);
+    if (streamingEl) {
+      streamingEl.remove();
+      streamingEl = null;
+    }
+  });
+
+  try {
+    let result;
+    try {
+      result = await atlas.context.interviewStreaming(contextInterviewFile, message, history);
+      if (result && result.error) throw new Error(result.error);
+    } catch {
+      atlas.context.removeStreamListeners();
+      removeTypingIndicator(typingEl);
+      if (streamingEl) {
+        streamingEl.remove();
+        streamingEl = null;
+      }
+      streamCreated = false;
+      streamingContent = '';
+      result = await atlas.context.interview(contextInterviewFile, message, history);
+    }
+
+    atlas.context.removeStreamListeners();
+    removeTypingIndicator(typingEl);
+
+    if (streamCreated && streamingEl) {
+      const contentEl = streamingEl.querySelector('.msg-content');
+      if (contentEl) {
+        contentEl.innerHTML = renderMarkdown(result.response);
+        contentEl.classList.remove('streaming-cursor');
+      }
+      streamingEl.classList.remove('streaming');
+    } else {
+      appendContextInterviewMessage('atlas', result.response);
+    }
+
+    return result;
+  } catch (err) {
+    atlas.context.removeStreamListeners();
+    removeTypingIndicator(typingEl);
+    throw err;
+  }
+}
 
 async function sendContextInterviewMessage() {
   const input = document.getElementById('context-interview-input');
@@ -1136,33 +1352,61 @@ async function sendContextInterviewMessage() {
 
   input.value = '';
   input.disabled = true;
+  document.getElementById('btn-context-save-now').disabled = true;
   document.getElementById('btn-context-interview-send').disabled = true;
 
   appendContextInterviewMessage('user', message);
   contextInterviewHistory.push({ role: 'User', content: message });
 
-  const typingEl = showTypingIndicator('context-interview-messages');
-
   try {
-    const result = await atlas.context.interview(contextInterviewFile, message, contextInterviewHistory.slice(0, -1));
-    removeTypingIndicator(typingEl);
-    appendContextInterviewMessage('atlas', result.response);
+    const result = await requestContextInterview(message, contextInterviewHistory.slice(0, -1));
     contextInterviewHistory.push({ role: 'Atlas', content: result.response });
 
     if (result.isReady && result.proposedContent) {
-      document.getElementById('context-proposed-content').textContent = result.proposedContent;
-      document.getElementById('context-interview-proposed').style.display = 'block';
-      document.getElementById('context-interview-input-bar').style.display = 'none';
+      showContextInterviewProposal(result.proposedContent);
     }
   } catch (err) {
-    removeTypingIndicator(typingEl);
     appendContextInterviewMessage('system', `Error: ${err.message}`);
   }
 
   input.disabled = false;
+  document.getElementById('btn-context-save-now').disabled = false;
   document.getElementById('btn-context-interview-send').disabled = false;
   input.focus();
 }
+
+document.getElementById('btn-context-save-now').addEventListener('click', async () => {
+  const input = document.getElementById('context-interview-input');
+  input.disabled = true;
+  document.getElementById('btn-context-save-now').disabled = true;
+  document.getElementById('btn-context-interview-send').disabled = true;
+
+  try {
+    const result = await requestContextInterview(
+      'Based on everything we have discussed, please propose the updated file now. Include all information gathered so far.',
+      contextInterviewHistory
+    );
+    contextInterviewHistory.push({ role: 'Atlas', content: result.response });
+
+    if (result.isReady && result.proposedContent) {
+      showContextInterviewProposal(result.proposedContent);
+    } else {
+      appendContextInterviewMessage('system', 'Atlas did not produce a structured update. Saving conversation notes to the file.');
+      const fallbackContent = contextInterviewHistory
+        .filter((message) => message.role === 'Atlas')
+        .map((message) => message.content)
+        .join('\n\n');
+      showContextInterviewProposal(fallbackContent);
+    }
+  } catch (err) {
+    appendContextInterviewMessage('system', `Error: ${err.message}`);
+  }
+
+  input.disabled = false;
+  document.getElementById('btn-context-save-now').disabled = false;
+  document.getElementById('btn-context-interview-send').disabled = false;
+  input.focus();
+});
 
 document.getElementById('btn-context-accept').addEventListener('click', async () => {
   const content = document.getElementById('context-proposed-content').textContent;
@@ -1170,11 +1414,23 @@ document.getElementById('btn-context-accept').addEventListener('click', async ()
   appendContextInterviewMessage('system', 'Saved successfully.');
   document.getElementById('context-interview-proposed').style.display = 'none';
   document.getElementById('context-interview-input-bar').style.display = 'flex';
-  setTimeout(() => {
+
+  const savedFile = contextInterviewFile; // capture before modal cleanup
+
+  setTimeout(async () => {
     closeModal('modal-context-interview');
-    loadMemoryContext();
-    loadMemory();
-  }, 1000);
+    await loadMemoryContext();
+    await loadMemory();
+
+    // Scroll to and highlight the saved file
+    const textarea = document.getElementById(`ctx-${savedFile}`);
+    if (textarea) {
+      textarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      textarea.style.borderColor = 'var(--success)';
+      textarea.style.transition = 'border-color 0.3s';
+      setTimeout(() => { textarea.style.borderColor = ''; }, 3000);
+    }
+  }, 800);
 });
 
 document.getElementById('btn-context-revise').addEventListener('click', () => {
@@ -1209,6 +1465,11 @@ function renderFilteredEntries() {
   const searchTerm = (document.getElementById('entries-search').value || '').toLowerCase().trim();
   const typeFilter = document.getElementById('entries-filter-type').value;
   const domainFilter = document.getElementById('entries-filter-domain').value;
+
+  if (allEntries.length === 0) {
+    container.innerHTML = '<div class="empty-state"><p>Memory entries are extracted automatically from your sessions. Atlas captures decisions, insights, commitments, patterns, and important data points.</p><p>High-importance entries persist beyond the 7-day rolling window.</p></div>';
+    return;
+  }
 
   let filtered = allEntries;
   if (searchTerm) filtered = filtered.filter((e) => (e.content || '').toLowerCase().includes(searchTerm));
@@ -1326,25 +1587,42 @@ async function loadSessions() {
   const container = document.getElementById('sessions-list');
 
   if (sessions.length === 0) {
-    container.innerHTML = '<div class="empty-state"><p>No sessions yet.</p></div>';
+    container.innerHTML = '<div class="empty-state"><p>Sessions are your conversations with Atlas. Each session is logged with a summary, extracted insights, and any commitments you made.</p><p>They\'ll appear here after you use "Talk to Atlas."</p></div>';
     return;
   }
 
-  container.innerHTML = sessions.map((s) => `
-    <div class="card session-card" onclick="toggleSessionDetail('${s.id}', this)" style="cursor:pointer">
-      <div class="card-header">
+  const clearAllBtn = `<div style="text-align:right;margin-bottom:12px">
+    <button class="btn btn-sm btn-danger" onclick="clearAllSessions()">Clear All Sessions</button>
+  </div>`;
+
+  container.innerHTML = clearAllBtn + sessions.map((s) => {
+    const modeLabel = {
+      'advisory': 'Session',
+      'brief': 'Brief',
+      'review': 'Review',
+      'mixed': 'Mixed',
+    }[s.mode] || s.mode || 'Session';
+
+    return `
+    <div class="card session-card" style="cursor:pointer">
+      <div class="card-header" onclick="toggleSessionDetail('${s.id}', this.parentElement)">
         <span class="card-title">${s.date}</span>
         <div>
-          <span class="tag tag-secondary">${s.mode || 'advisory'}</span>
+          <span class="tag tag-secondary">${modeLabel}</span>
           ${s.duration_minutes ? `<span class="tag tag-secondary">${s.duration_minutes} min</span>` : ''}
         </div>
       </div>
-      <div class="card-body md-content">${s.summary ? renderMarkdown(s.summary) : '<em>No summary</em>'}</div>
+      <div class="card-body md-content" onclick="toggleSessionDetail('${s.id}', this.parentElement)">
+        ${s.summary ? renderMarkdown(s.summary) : '<em style="color:var(--text-muted)">Session ended without processing — no summary was generated.</em>'}
+      </div>
+      <div style="text-align:right;padding:4px 12px 8px">
+        <button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); deleteSession('${s.id}')">Delete</button>
+      </div>
       <div class="session-detail" id="session-detail-${s.id}" style="display:none;margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
         <div class="loading"><div class="spinner"></div> Loading...</div>
       </div>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
 }
 
 async function toggleSessionDetail(sessionId, cardEl) {
@@ -1383,6 +1661,23 @@ async function toggleSessionDetail(sessionId, cardEl) {
     detail.innerHTML = `<div style="color:var(--danger);font-size:13px">Failed to load: ${escapeHtml(err.message)}</div>`;
   }
 }
+
+async function deleteSession(id) {
+  if (!confirm('Delete this session?')) return;
+  await atlas.sessions.delete(id);
+  showToast('Session deleted', 'success');
+  loadSessions();
+}
+
+async function clearAllSessions() {
+  if (!confirm('Delete all sessions? This cannot be undone.')) return;
+  await atlas.sessions.deleteAll();
+  showToast('All sessions cleared', 'success');
+  loadSessions();
+}
+
+window.deleteSession = deleteSession;
+window.clearAllSessions = clearAllSessions;
 
 // === FILES ===
 
@@ -1538,7 +1833,28 @@ async function loadSettingsStyle() {
         </div>
       `).join('')}
     </div>
+    <div class="card" style="margin-top:16px;border-color:var(--danger)">
+      <div class="card-header">
+        <span class="card-title" style="color:var(--danger)">Danger Zone</span>
+      </div>
+      <div class="card-body">
+        Permanently delete all goals, sessions, memory, actions, and files if you need a clean reset.
+      </div>
+      <div style="padding:0 16px 16px 16px">
+        <button class="btn btn-danger" onclick="resetAtlasData()">Reset Atlas - Delete All Data</button>
+      </div>
+    </div>
   `;
+}
+
+async function resetAtlasData() {
+  const confirmed = confirm('This will permanently delete all goals, sessions, memory, actions, and files. This cannot be undone. Continue?');
+  if (!confirmed) return;
+
+  await atlas.settings.resetAll();
+  pendingGoalDelete = null;
+  showToast('All data cleared. Atlas is ready for a fresh start.', 'success');
+  navigateTo('today');
 }
 
 async function loadSettingsAgents() {
@@ -2493,7 +2809,9 @@ function highlightGuideMatches(container, query) {
 // === Init ===
 
 async function init() {
-  await loadToday();
+  document.getElementById('today-date').textContent = new Date().toLocaleDateString('en-GB', {
+    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+  });
   initVoice();
   runHealthCheck();
 
@@ -2506,7 +2824,7 @@ async function init() {
     cachedEmailData = await atlas.email.fetch();
   } catch {}
 
-  loadToday();
+  await loadToday();
 }
 
 init();

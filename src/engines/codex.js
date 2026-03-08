@@ -122,7 +122,7 @@ class CodexEngine extends BaseEngine {
       options.model || this.preferredModel,
     ];
 
-    if (options.allowedTools && options.allowedTools.includes('mcp__claude-web-search__web_search')) {
+    if (options.useSearch) {
       args.push('--search');
     }
 
@@ -319,6 +319,10 @@ class CodexEngine extends BaseEngine {
       webSearch: true,
       localCli: true,
     };
+  }
+
+  getSearchOptions() {
+    return { useSearch: true };
   }
 
   getPreferredModel() {

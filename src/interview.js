@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const readline = require('readline');
 const { saveGoal } = require('./db');
-const { callClaude, mapDirectnessToTone, setSelectedTone } = require('./orchestrator');
+const { callEngine, mapDirectnessToTone, setSelectedTone } = require('./orchestrator');
 
 const REQUIRED_QUESTIONS = [
   'What do you want to achieve?',
@@ -81,7 +81,7 @@ The follow-up questions should be targeted and specific, pushing for measurable 
 If the goal is sharp enough to act on, respond with ONLY:
 {"sharp": true}`;
 
-  const result = await callClaude(evalPrompt, 'You evaluate goal specificity. Output only valid JSON, nothing else.');
+  const result = await callEngine(evalPrompt, 'You evaluate goal specificity. Output only valid JSON, nothing else.');
   const jsonMatch = result.match(/\{[\s\S]*\}/);
   if (!jsonMatch) return { sharp: true };
 
@@ -194,7 +194,7 @@ Rules:
 - The title must be sharp and specific — not vague.`;
 
   try {
-    const result = await callClaude(structurePrompt, 'You are a data structuring assistant. Output only valid JSON, nothing else.');
+    const result = await callEngine(structurePrompt, 'You are a data structuring assistant. Output only valid JSON, nothing else.');
 
     let jsonStr = result;
     const jsonMatch = result.match(/\{[\s\S]*\}/);

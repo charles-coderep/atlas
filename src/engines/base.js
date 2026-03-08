@@ -33,6 +33,10 @@ class BaseEngine {
     };
   }
 
+  getSearchOptions() {
+    return {};
+  }
+
   getPreferredModel() {
     return null;
   }

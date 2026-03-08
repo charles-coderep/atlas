@@ -1,6 +1,6 @@
 # Current Situation
 
-- **Employment:** [To be filled in]
-- **Financial overview:** [To be filled in]
-- **Living situation:** [To be filled in]
-- **Key context:** [To be filled in]
+- **What's happening right now:** [To be filled in]
+- **Main constraints:** [To be filled in]
+- **What's working well:** [To be filled in]
+- **What's not working:** [To be filled in]

@@ -1,7 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 
-// Load .env — check app root first, then resources directory for packaged app
+// Load .env â€” check app root first, then resources directory for packaged app
 const envPaths = [
   path.join(__dirname, '..', '.env'),
   path.join(process.resourcesPath || '', '.env'),
@@ -44,6 +44,15 @@ app.whenReady().then(async () => {
   // Run startup checks in background
   try {
     await db.initDB();
+    try {
+      const deletedEntries = await db.cleanupOldEntries(7);
+      const deletedSessions = await db.cleanupEmptySessions(30);
+      if (deletedEntries > 0 || deletedSessions > 0) {
+        console.log(`[Cleanup] Removed ${deletedEntries} expired entries, ${deletedSessions} empty sessions`);
+      }
+    } catch (cleanupErr) {
+      console.error('Cleanup failed:', cleanupErr.message);
+    }
   } catch (err) {
     console.error('Database init failed:', err.message);
   }
@@ -57,7 +66,7 @@ app.whenReady().then(async () => {
       if (!sources || !Array.isArray(sources.agents)) {
         const migrated = migrateGoalSources(g.goal_data || {}, g.type);
         await db.saveGoal({ ...g, goal_data: migrated });
-        console.log(`[Migration] Goal "${g.title}" → agents: [${migrated.context_sources.agents.join(', ')}]`);
+        console.log(`[Migration] Goal "${g.title}" â†’ agents: [${migrated.context_sources.agents.join(', ')}]`);
       }
     }
   } catch (err) {
@@ -112,6 +121,8 @@ function registerIPC() {
   ipcMain.handle('sessions:getRecent', (_, days) => db.getRecentSessions(days || 30));
   ipcMain.handle('sessions:create', (_, mode) => db.createSession(mode));
   ipcMain.handle('sessions:update', (_, id, updates) => db.updateSession(id, updates));
+  ipcMain.handle('sessions:delete', (_, id) => db.deleteSession(id));
+  ipcMain.handle('sessions:deleteAll', () => db.deleteAllSessions());
 
   // --- DB: Entries ---
   ipcMain.handle('entries:getRecent', (_, days) => db.getRecentEntries(days || 7));
@@ -152,11 +163,16 @@ function registerIPC() {
     return ingestFile(result.filePaths[0], goalId);
   });
 
+  ipcMain.handle('settings:resetAll', async () => {
+    await db.resetAllData();
+    return { ok: true };
+  });
+
   // --- AI: Brief ---
   ipcMain.handle('brief:generate', async (_, options) => {
     const briefStartedAt = Date.now();
     const { getActiveGoals } = db;
-    const { buildSystemPrompt, callClaude } = require('../src/orchestrator');
+    const { buildSystemPrompt, callEngine, getGoalSourcePolicy } = require('../src/orchestrator');
     const { getOpenActions, getOverdueActions } = db;
 
     const goals = await getActiveGoals();
@@ -165,8 +181,13 @@ function registerIPC() {
     console.log('[Brief] Goal statuses:', allGoals.map(g => `${g.id}: ${g.status}`).join(', '));
     if (goals.length === 0) return null;
 
+    const sourcePolicy = getGoalSourcePolicy(goals);
+    const filteredOptions = { ...(options || {}) };
+    if (!sourcePolicy.calendar) delete filteredOptions.calendarData;
+    if (!sourcePolicy.gmail) delete filteredOptions.emailData;
+
     const promptStartedAt = Date.now();
-    const systemPrompt = await buildSystemPrompt(goals, options || {});
+    const systemPrompt = await buildSystemPrompt(goals, filteredOptions);
     logTiming('System prompt built', promptStartedAt);
     console.log('[Brief] System prompt length:', systemPrompt.length);
     const openActions = await getOpenActions();
@@ -178,13 +199,13 @@ function registerIPC() {
     });
 
     const sections = [
-      '**Top 3 Priorities Today** — derived from active goals AND open action items.',
-      '**Open Commitments** — status of action items, especially overdue ones.',
-      '**Risks or Concerns** — patterns from recent sessions, overdue items, goal drift.',
+      '**Top 3 Priorities Today** - derived from active goals AND open action items.',
+      '**Open Commitments** - status of action items, especially overdue ones.',
+      '**Risks or Concerns** - patterns from recent sessions, overdue items, goal drift.',
     ];
-    if (options && options.calendarData) sections.push('**Schedule Awareness** — today\'s events and conflicts.');
-    if (options && options.emailData) sections.push('**Email Highlights** — goal-relevant emails requiring action.');
-    sections.push('**Recommended Focus** — clear directive on where to spend time and energy today.');
+    if (sourcePolicy.calendar && filteredOptions.calendarData) sections.push('**Schedule Awareness** - today\'s events and conflicts.');
+    if (sourcePolicy.gmail && filteredOptions.emailData) sections.push('**Email Highlights** - goal-relevant emails requiring action.');
+    sections.push('**Recommended Focus** - clear directive on where to spend time and energy today.');
 
     const numberedSections = sections.map((s, i) => `${i + 1}. ${s}`).join('\n');
 
@@ -203,7 +224,7 @@ Keep it scannable. Under 3 minutes to read. Reference specific past events and c
 
     console.log('[Brief] Calling active AI engine...');
     try {
-      const result = await callClaude(briefPrompt, systemPrompt, { label: 'Brief generated' });
+      const result = await callEngine(briefPrompt, systemPrompt, { label: 'Brief generated' });
       console.log('[Brief] Response length:', result ? result.length : 0);
       logTiming('Brief generated', briefStartedAt);
       return result;
@@ -223,7 +244,7 @@ Keep it scannable. Under 3 minutes to read. Reference specific past events and c
     const goals = await db.getActiveGoals();
     if (goals.length === 0) return { error: 'No active goals. Create a goal first.' };
 
-    const { buildSystemPrompt, callClaude, checkUserContextFiles } = require('../src/orchestrator');
+    const { buildSystemPrompt, callEngine, checkUserContextFiles } = require('../src/orchestrator');
     const promptStartedAt = Date.now();
     chatSystemPrompt = await buildSystemPrompt(goals, options || {});
     logTiming('System prompt built', promptStartedAt);
@@ -264,20 +285,20 @@ Keep it scannable. Under 3 minutes to read. Reference specific past events and c
     }
 
     if (contextWarnings.length > 0) {
-      openerParts.push(`THIN CONTEXT: These user files still have placeholder content: ${contextWarnings.map(w => w.split(' — ')[0]).join(', ')}. Consider offering to fill them in.`);
+      openerParts.push(`THIN CONTEXT: These user files still have placeholder content: ${contextWarnings.map(w => w.split(' â€” ')[0]).join(', ')}. Consider offering to fill them in.`);
     }
 
-    const openerPrompt = `You are starting a new advisory session. Generate a specific, grounded opening. 2-4 sentences max. Reference what you actually know — overdue items, recent sessions, active goals, today's date. Feel like you've been thinking about the user between sessions. Never be generic. Never introduce yourself.
+    const openerPrompt = `You are starting a new advisory session. Generate a specific, grounded opening. 2-4 sentences max. Reference what you actually know â€” overdue items, recent sessions, active goals, today's date. Feel like you've been thinking about the user between sessions. Never be generic. Never introduce yourself.
 
 Context for your opening:
-${openerParts.length > 0 ? openerParts.join('\n') : 'No specific items — but you have the user\'s goals and context in your system prompt. Reference something specific.'}
+${openerParts.length > 0 ? openerParts.join('\n') : 'No specific items â€” but you have the user\'s goals and context in your system prompt. Reference something specific.'}
 
 Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}.`;
 
     let opening = null;
     try {
       const openingStartedAt = Date.now();
-      opening = await callClaude(openerPrompt, chatSystemPrompt, { label: 'Session opening generated' });
+      opening = await callEngine(openerPrompt, chatSystemPrompt, { label: 'Session opening generated' });
       logTiming('Session opening generated', openingStartedAt);
       chatHistory.push({ role: 'Atlas', content: opening });
 
@@ -293,7 +314,7 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
     return { sessionId: chatSession.id, opening };
   });
 
-  // Session windowing — keep history manageable
+  // Session windowing â€” keep history manageable
   const MAX_HISTORY_MESSAGES = 40;
   const WINDOWED_KEEP_RECENT = 20;
 
@@ -309,14 +330,14 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
   ipcMain.handle('chat:send', async (_, message) => {
     if (!chatSession) return { error: 'No active session' };
 
-    const { callClaudeConversation } = require('../src/orchestrator');
+    const { callEngineConversation } = require('../src/orchestrator');
     const { webSearch } = require('../src/search');
     const { searchGmail } = require('../src/integrations/gmail');
 
     chatHistory.push({ role: 'User', content: message });
     windowHistory();
 
-    let response = await callClaudeConversation(message, chatSystemPrompt, chatHistory.slice(0, -1));
+    let response = await callEngineConversation(message, chatSystemPrompt, chatHistory.slice(0, -1));
 
     // Process markers
     const markers = [];
@@ -356,7 +377,7 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
 
       if (contextParts.length > 0) {
         const refinedPrompt = `Here is the information you requested:\n\n${contextParts.join('\n\n---\n\n')}\n\nNow incorporate all of this into your advice. Cite what you found. Be specific.`;
-        response = await callClaudeConversation(refinedPrompt, chatSystemPrompt, chatHistory);
+        response = await callEngineConversation(refinedPrompt, chatSystemPrompt, chatHistory);
       }
     }
 
@@ -372,6 +393,9 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
     let result = { entries: 0, actions: 0 };
     try {
       if (chatHistory.length >= 4) {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('chat:processing-status', 'Extracting session insights...');
+        }
         const { processSession } = require('../src/processor');
         result = await processSession(chatSession.id, chatHistory, duration);
       } else {
@@ -393,7 +417,7 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
   ipcMain.handle('chat:sendStreaming', async (_, message) => {
     if (!chatSession) return { error: 'No active session' };
 
-    const { callClaudeStreaming, callClaudeConversation } = require('../src/orchestrator');
+    const { callEngineStreaming, callEngineConversation } = require('../src/orchestrator');
     const { webSearch } = require('../src/search');
     const { searchGmail } = require('../src/integrations/gmail');
 
@@ -408,7 +432,7 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
 
     let fullResponse = '';
     try {
-      fullResponse = await callClaudeStreaming(fullPrompt, chatSystemPrompt, {}, (chunk) => {
+      fullResponse = await callEngineStreaming(fullPrompt, chatSystemPrompt, {}, (chunk) => {
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('chat:stream-chunk', chunk);
         }
@@ -459,7 +483,7 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
       if (contextParts.length > 0) {
         // For marker follow-up, use buffered call and push the full response
         const refinedPrompt = `Here is the information you requested:\n\n${contextParts.join('\n\n---\n\n')}\n\nNow incorporate all of this into your advice. Cite what you found. Be specific.`;
-        fullResponse = await callClaudeConversation(refinedPrompt, chatSystemPrompt, chatHistory);
+        fullResponse = await callEngineConversation(refinedPrompt, chatSystemPrompt, chatHistory);
         mainWindow.webContents.send('chat:stream-replace', fullResponse);
       }
     }
@@ -587,7 +611,7 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
       strong { font-weight: 600; } code { background: #f0f0f0; padding: 2px 4px; border-radius: 3px; font-size: 13px; }
       .meta { color: #666; font-size: 12px; margin-bottom: 20px; }
     </style></head><body>
-      <h1>Atlas — ${title || 'Brief'}</h1>
+      <h1>Atlas â€” ${title || 'Brief'}</h1>
       <div class="meta">${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</div>
       ${htmlContent}
     </body></html>`;
@@ -603,7 +627,7 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
 
   // --- AI: End-of-Day Reflection ---
   ipcMain.handle('brief:reflection', async (_, options) => {
-    const { buildSystemPrompt, callClaude } = require('../src/orchestrator');
+    const { buildSystemPrompt, callEngine } = require('../src/orchestrator');
     const goals = await db.getActiveGoals();
     if (goals.length === 0) return null;
 
@@ -625,14 +649,14 @@ ${sessionSummaries}
 Open actions: ${openActions.length} (${overdueActions.length} overdue)
 
 Generate a brief, honest reflection covering:
-1. **What moved forward today** — concrete progress on goals
-2. **What didn't happen** — planned items that were skipped or avoided
-3. **Pattern check** — any drift, avoidance, or procrastination patterns
-4. **Tomorrow's priority** — the single most important thing to do first
+1. **What moved forward today** â€” concrete progress on goals
+2. **What didn't happen** â€” planned items that were skipped or avoided
+3. **Pattern check** â€” any drift, avoidance, or procrastination patterns
+4. **Tomorrow's priority** â€” the single most important thing to do first
 
 Be direct. Under 2 minutes to read. No fluff.`;
 
-    return callClaude(reflectionPrompt, systemPrompt);
+    return callEngine(reflectionPrompt, systemPrompt);
   });
 
   // --- Engine Info ---
@@ -772,7 +796,7 @@ Be direct. Under 2 minutes to read. No fluff.`;
   let interviewGoalId = null;
 
   ipcMain.handle('interview:start', async (_, options) => {
-    const { callClaude, loadUserContext, generateGoalId } = require('../src/orchestrator');
+    const { callEngine, loadUserContext, generateGoalId } = require('../src/orchestrator');
     interviewHistory = [];
     interviewMode = options && options.goalId ? 'edit' : 'create';
     interviewGoalId = options && options.goalId ? options.goalId : null;
@@ -781,19 +805,21 @@ Be direct. Under 2 minutes to read. No fluff.`;
     const userName = (userCtx.identity.match(/\*\*Name:\*\*\s*(.+)/i) || [])[1] || '';
     const cleanName = userName.replace(/\[.*?\]/g, '').trim();
 
-    let systemPrompt = `You are Atlas, a strategic adviser conducting a goal-definition conversation. You are warm, direct, and personable — like a sharp senior colleague who genuinely wants to help.
+    let systemPrompt = `You are Atlas, a strategic adviser conducting a goal-definition conversation. You are warm, direct, and personable â€” like a sharp senior colleague who genuinely wants to help.
 
 Rules:
 - Ask one or two questions at a time, never a list
 - Acknowledge what the user shared before asking more
-- Infer fields from natural language — if they say "I need a job in 2 months" you already have timeframe and urgency
-- Never use field names like "success criteria" or "baseline" — use natural language
+- Infer fields from natural language â€” if they say "I need a job in 2 months" you already have timeframe and urgency
+- Never use field names like "success criteria" or "baseline" â€” use natural language
 - Don't number your questions
 - Push back warmly on vague goals: "I can work with that direction, but I need to sharpen it before it's useful."
 - When you have enough information, present a summary in natural prose (NOT a field list or JSON)
 - Required information: outcome (what success looks like), metric (how to measure), timeframe, current baseline, why now, constraints, anti-goals (what they won't sacrifice)
 - ${cleanName ? `The user's name is ${cleanName}. Use it naturally, not every message.` : 'You don\'t know the user\'s name yet.'}
 - When the goal is sharp, present it like: "Here's what I'm working with: you want to [outcome] by [date], starting from [baseline]. The main constraints are [constraints], and you definitely don't want [anti-goals]. Sound right?"
+- Keep every response under 4 sentences. You are having a conversation, not writing an essay.
+- After briefly acknowledging what the user said, ask your next question immediately. Do not summarise, restate, or elaborate on what they told you.
 - After the user confirms, respond with EXACTLY the text "GOAL_READY" on its own line at the start, followed by your confirmation message.`;
 
     let opening;
@@ -806,22 +832,22 @@ Rules:
         .map(([k, v]) => `${k.replace(/_/g, ' ')}: ${v}`)
         .join(', ');
 
-      opening = await callClaude(
+      opening = await callEngine(
         `The user wants to update their goal "${goal.title}". Here's what we currently have: ${summary}. Generate a warm, brief opening (2-3 sentences) asking what they'd like to change. Don't list every field.`,
         systemPrompt
       );
     } else {
-      // Check if Atlas knows the user — skip cold intro if so
+      // Check if Atlas knows the user â€” skip cold intro if so
       const hasIdentity = userCtx.identity && !/\[.*to be filled.*\]/i.test(userCtx.identity);
       const existingSessions = await db.getRecentSessions(30);
       const existingGoals = await db.getActiveGoals();
       const isReturning = hasIdentity || existingSessions.length > 0 || existingGoals.length > 0;
 
       const createPrompt = isReturning
-        ? `The user wants to create a new goal. You already know them${cleanName ? ` (${cleanName})` : ''} and they have ${existingGoals.length} active goal(s). Generate a brief opening (2-3 sentences). Don't introduce yourself. Just get straight to it: ask what they're working toward.`
-        : `Start a new goal-definition conversation. This is a new user you haven't met yet. Generate a warm, personable opening (2-3 sentences). Briefly introduce yourself and invite them to describe what they're trying to achieve. Don't be bureaucratic.`;
+        ? `The user wants to create a new goal. You already know them${cleanName ? ` (${cleanName})` : ''} and they have ${existingGoals.length} active goal(s). Generate a brief opening (1-2 sentences max). Skip pleasantries. Ask what they're working toward.`
+        : `Start a new goal-definition conversation. This is a new user you haven't met yet. Generate a brief opening (2 sentences max). Ask what they're working toward. No preamble.`;
 
-      opening = await callClaude(createPrompt, systemPrompt);
+      opening = await callEngine(createPrompt, systemPrompt);
       interviewGoalId = await generateGoalId();
     }
 
@@ -830,21 +856,24 @@ Rules:
   });
 
   ipcMain.handle('interview:send', async (_, message) => {
-    const { callClaudeConversation } = require('../src/orchestrator');
+    const { callEngineConversation } = require('../src/orchestrator');
 
     const { AGENT_DEFAULTS_BY_TYPE } = require('../src/orchestrator');
     const systemPrompt = `You are Atlas conducting a goal-definition conversation. Be warm, direct, personable. Ask one or two questions at a time. Acknowledge what was shared. Infer what you can. Push back on vagueness warmly. Never use field names. Don't number questions.
 
 Required information to gather: outcome, metric, timeframe, baseline, why now, constraints, anti-goals.
 
-When the goal is sharp enough, present a natural-language summary and ask for confirmation. As part of your summary, mention which advisory perspectives you'll use — these are specialist thinking lenses that sharpen your advice. For example: "I'll sharpen my thinking with a few specialist perspectives — a job search strategist, a financial adviser, and a day planner. I'll always keep the meta-analyst for cross-goal awareness." If the user mentions something that suggests an additional perspective (like "I struggle with networking anxiety"), proactively suggest it: "I'll add a communication perspective for that."
+Keep every response under 4 sentences. You are having a conversation, not writing an essay.
+After briefly acknowledging what the user said, ask your next question immediately. Do not summarise, restate, or elaborate on what they told you.
+
+When the goal is sharp enough, present a natural-language summary and ask for confirmation. As part of your summary, mention which advisory perspectives you'll use — these are specialist thinking lenses that sharpen your advice.
 
 Available perspective defaults by goal type: ${JSON.stringify(AGENT_DEFAULTS_BY_TYPE)}. Meta-analyst is always included. You can suggest perspectives not in the defaults if the conversation warrants it — use a lowercase-hyphenated name.
 
-After the user confirms, your response MUST start with "GOAL_READY" on its own line, followed by your confirmation message. Include a line starting with "PERSPECTIVES:" followed by a comma-separated list of the agreed perspective names (lowercase-hyphenated slugs). Example: "PERSPECTIVES: job-search, financial, day-planner, learning, meta-analyst"`;
+After the user confirms, your response MUST start with “GOAL_READY” on its own line, followed by your confirmation message. Include a line starting with “PERSPECTIVES:” followed by a comma-separated list of the agreed perspective names (lowercase-hyphenated slugs). Example: “PERSPECTIVES: job-search, financial, day-planner, learning, meta-analyst”`;
 
     interviewHistory.push({ role: 'User', content: message });
-    const response = await callClaudeConversation(message, systemPrompt, interviewHistory.slice(0, -1));
+    const response = await callEngineConversation(message, systemPrompt, interviewHistory.slice(0, -1));
     interviewHistory.push({ role: 'Atlas', content: response });
 
     const isReady = response.trim().startsWith('GOAL_READY');
@@ -861,8 +890,64 @@ After the user confirms, your response MUST start with "GOAL_READY" on its own l
     return { response: cleanResponse, isReady, suggestedPerspectives };
   });
 
+  ipcMain.handle('interview:sendStreaming', async (_, message) => {
+    const { callEngineStreaming } = require('../src/orchestrator');
+    const { AGENT_DEFAULTS_BY_TYPE } = require('../src/orchestrator');
+
+    const systemPrompt = `You are Atlas conducting a goal-definition conversation. Be warm, direct, personable. Ask one or two questions at a time. Acknowledge what was shared. Infer what you can. Push back on vagueness warmly. Never use field names. Don't number questions.
+
+Required information to gather: outcome, metric, timeframe, baseline, why now, constraints, anti-goals.
+
+Keep every response under 4 sentences. You are having a conversation, not writing an essay.
+After briefly acknowledging what the user said, ask your next question immediately. Do not summarise, restate, or elaborate on what they told you.
+
+When the goal is sharp enough, present a natural-language summary and ask for confirmation. As part of your summary, mention which advisory perspectives you'll use - these are specialist thinking lenses that sharpen your advice.
+
+Available perspective defaults by goal type: ${JSON.stringify(AGENT_DEFAULTS_BY_TYPE)}. Meta-analyst is always included. You can suggest perspectives not in the defaults if the conversation warrants it - use a lowercase-hyphenated name.
+
+After the user confirms, your response MUST start with "GOAL_READY" on its own line, followed by your confirmation message. Include a line starting with "PERSPECTIVES:" followed by a comma-separated list of the agreed perspective names (lowercase-hyphenated slugs).`;
+
+    const historyPrefix = [...interviewHistory];
+    const fullPrompt = historyPrefix.length > 0
+      ? `Previous conversation:\n${historyPrefix.map((m) => `${m.role}: ${m.content}`).join('\n')}\n\nUser: ${message}`
+      : message;
+
+    let fullResponse = '';
+    try {
+      fullResponse = await callEngineStreaming(fullPrompt, systemPrompt, {}, (chunk) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('interview:stream-chunk', chunk);
+        }
+      });
+    } catch (err) {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('interview:stream-error', err.message);
+      }
+      return { error: err.message };
+    }
+
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('interview:stream-end');
+    }
+
+    interviewHistory.push({ role: 'User', content: message });
+    interviewHistory.push({ role: 'Atlas', content: fullResponse });
+
+    const isReady = fullResponse.trim().startsWith('GOAL_READY');
+    let cleanResponse = fullResponse.replace(/^GOAL_READY\n?/, '');
+
+    let suggestedPerspectives = null;
+    const perspMatch = cleanResponse.match(/^PERSPECTIVES:\s*(.+)$/m);
+    if (perspMatch) {
+      suggestedPerspectives = perspMatch[1].split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+      cleanResponse = cleanResponse.replace(/^PERSPECTIVES:.*$/m, '').trim();
+    }
+
+    return { response: cleanResponse, isReady, suggestedPerspectives };
+  });
+
   ipcMain.handle('interview:complete', async () => {
-    const { callClaude, generateGoalId, DEFAULT_CONTEXT_SOURCES, mapDirectnessToTone, setSelectedTone } = require('../src/orchestrator');
+    const { callEngine, generateGoalId, DEFAULT_CONTEXT_SOURCES, mapDirectnessToTone, setSelectedTone } = require('../src/orchestrator');
 
     const transcript = interviewHistory.map((m) => `${m.role}: ${m.content}`).join('\n\n');
 
@@ -886,7 +971,7 @@ Extract a structured goal from this conversation. Return ONLY a valid JSON objec
 
 Return ONLY valid JSON. No explanation.`;
 
-    const result = await callClaude(structurePrompt, 'You extract structured data from conversations. Output only valid JSON.');
+    const result = await callEngine(structurePrompt, 'You extract structured data from conversations. Output only valid JSON.');
     const match = result.match(/\{[\s\S]*\}/);
     if (!match) throw new Error('Failed to structure goal from conversation');
 
@@ -940,7 +1025,7 @@ Return ONLY valid JSON. No explanation.`;
 
   // Keep legacy handler for backward compat
   ipcMain.handle('interview:structure', async (_, answers) => {
-    const { callClaude } = require('../src/orchestrator');
+    const { callEngine } = require('../src/orchestrator');
     const prompt = `Structure these goal interview answers into a JSON goal record:
 
 ${JSON.stringify(answers, null, 2)}
@@ -949,15 +1034,29 @@ Return a JSON object with fields: id (generate a short slug), title, type (caree
 
 Return ONLY valid JSON.`;
 
-    const result = await callClaude(prompt, 'You structure goal data. Output only valid JSON.');
+    const result = await callEngine(prompt, 'You structure goal data. Output only valid JSON.');
     const match = result.match(/\{[\s\S]*\}/);
     if (!match) throw new Error('Failed to structure goal');
     return JSON.parse(match[0]);
   });
 
   // --- Conversational Context Update ---
+  const contextFileGuidance = {
+    'IDENTITY.md': `This file describes who the user is as a person — name, location, background, and how they like to communicate. It is not goal-specific. Keep it stable and broadly useful.
+
+Look at the current file content above. If any fields still say "[To be filled in]" or similar placeholder text, ask about those specific fields first. Work through unfilled fields one at a time. Do not ask open-ended questions like "what's on your mind?" when there are specific blank fields to fill.`,
+
+    'SITUATION.md': `This file describes the user's current life circumstances. It must be goal-agnostic — do not assume a particular goal type. Ask about what's happening in their life, constraints on their time and energy, what's working, and what's not. Include financial, health, relationship, or work context only when the user volunteers it.
+
+Look at the current file content above. If any fields still say "[To be filled in]" or similar placeholder text, ask about those specific fields first. Work through unfilled fields one at a time. When all fields have real content, propose the update.`,
+
+    'PREFERENCES.md': `This file describes how the user wants Atlas to behave — directness level, working style, communication preferences. It is not goal-specific.
+
+Look at the current file content above. If any fields still say "[To be filled in]" or similar placeholder text, ask about those specific fields first. Work through unfilled fields one at a time. Only shift to open-ended questions once all fields have real content.`,
+  };
+
   ipcMain.handle('context:interview', async (_, file, message, history) => {
-    const { callClaudeConversation, loadUserContext } = require('../src/orchestrator');
+    const { callEngineConversation, loadUserContext } = require('../src/orchestrator');
     const userCtx = loadUserContext();
 
     const fileLabels = {
@@ -971,12 +1070,16 @@ Return ONLY valid JSON.`;
 
     const systemPrompt = `You are Atlas helping update the user's ${info.label} file. Be warm and conversational.
 
+${contextFileGuidance[file] || ''}
+
+Keep every response under 3 sentences. Ask one thing at a time. Do not summarise what the user just told you — acknowledge briefly and move to the next question or propose the update.
+
 Current file content:
 ${info.current}
 
 Your job: gather information from the user through conversation, then when you have enough, propose updated file content. When proposing the update, start your response with "CONTEXT_READY" on its own line, then include the proposed markdown content between \`\`\`markdown and \`\`\` fences.`;
 
-    const response = await callClaudeConversation(message, systemPrompt, history || []);
+    const response = await callEngineConversation(message, systemPrompt, history || []);
     const isReady = response.includes('CONTEXT_READY');
 
     let proposedContent = null;
@@ -991,4 +1094,67 @@ Your job: gather information from the user through conversation, then when you h
       proposedContent,
     };
   });
+
+  ipcMain.handle('context:interviewStreaming', async (_, file, message, history) => {
+    const { callEngineStreaming, loadUserContext } = require('../src/orchestrator');
+    const userCtx = loadUserContext();
+
+    const fileLabels = {
+      'IDENTITY.md': { label: 'Identity', current: userCtx.identity },
+      'SITUATION.md': { label: 'Situation', current: userCtx.situation },
+      'PREFERENCES.md': { label: 'Preferences', current: userCtx.preferences },
+    };
+
+    const info = fileLabels[file];
+    if (!info) throw new Error('Invalid context file');
+
+    const systemPrompt = `You are Atlas helping update the user's ${info.label} file. Be warm and conversational.
+
+${contextFileGuidance[file] || ''}
+
+Keep every response under 3 sentences. Ask one thing at a time. Do not summarise what the user just told you — acknowledge briefly and move to the next question or propose the update.
+
+Current file content:
+${info.current}
+
+Your job: gather information from the user through conversation, then when you have enough, propose updated file content. When proposing the update, start your response with "CONTEXT_READY" on its own line, then include the proposed markdown content between \`\`\`markdown and \`\`\` fences.`;
+
+    const historyPrefix = history || [];
+    const fullPrompt = historyPrefix.length > 0
+      ? `Previous conversation:\n${historyPrefix.map((m) => `${m.role}: ${m.content}`).join('\n')}\n\nUser: ${message}`
+      : message;
+
+    let fullResponse = '';
+    try {
+      fullResponse = await callEngineStreaming(fullPrompt, systemPrompt, {}, (chunk) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('context:stream-chunk', chunk);
+        }
+      });
+    } catch (err) {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('context:stream-error', err.message);
+      }
+      return { error: err.message };
+    }
+
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('context:stream-end');
+    }
+
+    const isReady = fullResponse.includes('CONTEXT_READY');
+    let proposedContent = null;
+    if (isReady) {
+      const mdMatch = fullResponse.match(/```markdown\n([\s\S]*?)```/);
+      if (mdMatch) proposedContent = mdMatch[1].trim();
+    }
+
+    return {
+      response: fullResponse.replace(/^CONTEXT_READY\n?/, ''),
+      isReady,
+      proposedContent,
+    };
+  });
 }
+
+

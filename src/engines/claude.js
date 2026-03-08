@@ -120,6 +120,10 @@ class ClaudeEngine extends BaseEngine {
     };
   }
 
+  getSearchOptions() {
+    return { allowedTools: ['mcp__claude-web-search__web_search'] };
+  }
+
   getPreferredModel() {
     return this.preferredModel;
   }

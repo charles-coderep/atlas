@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const { getRuntimeFile, readRuntimeJson, writeRuntimeJson } = require('./runtime');
 
 const CONFIG_DIR = path.join(__dirname, '..', 'config');
-const TOKEN_CEILING = 6000;
+const TOKEN_CEILING = 12000;
 const SETTINGS_FILE = 'settings.json';
 const VALID_TONES = ['supportive', 'direct', 'challenging', 'uncompromising'];
 
@@ -150,7 +150,7 @@ function migrateGoalSources(goalData, type) {
   return goalData;
 }
 
-// Generate a perspective file via Claude
+// Generate a perspective file via the active engine
 async function generatePerspective(name, domain) {
   const prompt = `Create an advisory perspective file for "${domain}". Follow this exact format:
 
@@ -170,7 +170,7 @@ async function generatePerspective(name, domain) {
 
 Keep it under 25 lines. Be specific to the domain, not generic. The perspective name should be a professional title.`;
 
-  const content = await callClaude(prompt, 'You create concise advisory perspective files. Output only the markdown content, nothing else.');
+  const content = await callEngine(prompt, 'You create concise advisory perspective files. Output only the markdown content, nothing else.');
   const agentsDir = path.join(CONFIG_DIR, 'agents');
   const filePath = path.join(agentsDir, `${name}.md`);
   fs.writeFileSync(filePath, content.trim(), 'utf-8');
@@ -663,15 +663,19 @@ function getAvailableTones() {
 }
 
 module.exports = {
-  buildSystemPrompt, callClaude, callClaudeStreaming, callClaudeConversation,
+  buildSystemPrompt, callEngine, callEngineStreaming, callEngineConversation,
+  callClaude: callEngine,
+  callClaudeStreaming: callEngineStreaming,
+  callClaudeConversation: callEngineConversation,
   loadUserContext, loadAgentSpecs, listAgentFiles, checkUserContextFiles,
   getLastDiagnostics, generateGoalId, DEFAULT_CONTEXT_SOURCES, AGENT_DEFAULTS_BY_TYPE,
   migrateGoalSources, generatePerspective, perspectiveExists,
   getEngine, setEngine, getAvailableEngines, getActiveEngineName,
+  getGoalSourcePolicy,
   getSelectedTone, setSelectedTone, getAvailableTones, loadToneOverlay, mapDirectnessToTone, syncPreferencesTone,
 };
 
-async function callClaude(prompt, systemPrompt, options = {}) {
+async function callEngine(prompt, systemPrompt, options = {}) {
   const startedAt = Date.now();
   const label = options.label || 'Active AI engine responded';
   const result = await getEngine().send(prompt, systemPrompt, options);
@@ -679,7 +683,7 @@ async function callClaude(prompt, systemPrompt, options = {}) {
   return result;
 }
 
-async function callClaudeStreaming(prompt, systemPrompt, options = {}, onChunk) {
+async function callEngineStreaming(prompt, systemPrompt, options = {}, onChunk) {
   const startedAt = Date.now();
   let firstChunkAt = null;
   const result = await getEngine().sendStreaming(prompt, systemPrompt, options, (chunk) => {
@@ -693,10 +697,10 @@ async function callClaudeStreaming(prompt, systemPrompt, options = {}, onChunk) 
   return result;
 }
 
-function callClaudeConversation(prompt, systemPrompt, conversationHistory) {
+function callEngineConversation(prompt, systemPrompt, conversationHistory) {
   const fullPrompt = conversationHistory.length > 0
     ? `Previous conversation:\n${conversationHistory.map((m) => `${m.role}: ${m.content}`).join('\n')}\n\nUser: ${prompt}`
     : prompt;
 
-  return callClaude(fullPrompt, systemPrompt);
+  return callEngine(fullPrompt, systemPrompt);
 }

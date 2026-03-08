@@ -90,7 +90,7 @@
       <div style="margin-bottom:16px">
         <button class="btn btn-primary" id="btn-generate-brief">Generate Morning Brief</button>
         <button class="btn" id="btn-generate-reflection">End-of-Day Reflection</button>
-        <button class="btn" onclick="navigateTo('chat')">Start Session</button>
+        <button class="btn" id="btn-today-session" onclick="navigateTo('chat')">Start Session</button>
       </div>
       <div class="card" id="brief-card" style="display:none">
         <div class="card-header">
@@ -99,7 +99,7 @@
         </div>
         <div class="card-body brief-content md-content" id="brief-content"></div>
         <div class="brief-actions">
-          <button class="btn btn-primary" onclick="navigateTo('chat')">Start Session</button>
+          <button class="btn btn-primary" id="btn-brief-session" onclick="navigateTo('chat')">Start Session</button>
           <button class="btn btn-sm" onclick="exportBriefPDF()">Export PDF</button>
         </div>
       </div>
@@ -153,7 +153,10 @@
       <div id="goal-interview-panel" class="conversation-panel" style="display:none">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
           <span style="font-size:14px;color:var(--text-secondary)" id="goal-interview-title">Defining a new goal...</span>
-          <button class="btn btn-sm" id="btn-cancel-interview" onclick="cancelGoalInterview()">Cancel</button>
+          <div class="btn-group">
+            <button class="btn btn-sm btn-primary" id="btn-goal-interview-save" style="display:none" title="Save the goal from what you've discussed so far">Save Goal</button>
+            <button class="btn btn-sm" id="btn-cancel-interview" onclick="cancelGoalInterview()">Cancel</button>
+          </div>
         </div>
         <div class="chat-messages" id="goal-interview-messages"></div>
         <div class="chat-input-bar" id="goal-interview-input-bar">
@@ -162,7 +165,6 @@
           </button>
           <input type="text" class="chat-input" id="goal-interview-input" placeholder="Describe your goal..." autocomplete="off">
           <button class="btn btn-primary" id="btn-goal-interview-send">Send</button>
-          <button class="btn btn-sm" id="btn-goal-interview-save" style="display:none" title="Save the goal from the conversation so far">Save Goal</button>
         </div>
       </div>
     </div>
@@ -313,6 +315,7 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
         </button>
         <input type="text" class="chat-input" id="context-interview-input" placeholder="Tell Atlas about yourself..." autocomplete="off">
+        <button class="btn btn-sm btn-primary" id="btn-context-save-now" title="Ask Atlas to propose the file update based on what you've discussed">Draft Update</button>
         <button class="btn btn-primary" id="btn-context-interview-send">Send</button>
       </div>
     </div>
@@ -361,31 +364,17 @@
   <div class="modal-overlay" id="modal-goal-delete">
     <div class="modal" style="max-width:560px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-        <div class="modal-title" style="margin-bottom:0">Delete Goal</div>
+        <div class="modal-title" style="margin-bottom:0">Goal Options</div>
         <button class="btn btn-sm" onclick="closeModal('modal-goal-delete')">Close</button>
       </div>
       <div style="margin-bottom:16px;line-height:1.6">
-        <div style="margin-bottom:10px">Delete Goal: <strong id="goal-delete-title"></strong></div>
-        <div style="color:var(--text-secondary);margin-bottom:10px">This will permanently remove:</div>
+        <div style="margin-bottom:10px"><strong id="goal-delete-title"></strong></div>
+        <div style="color:var(--text-secondary);margin-bottom:10px" id="goal-delete-summary"></div>
         <ul class="modal-count-list" id="goal-delete-counts"></ul>
-      </div>
-      <div class="form-group">
-        <label class="form-label">Choose what to delete</label>
-        <label class="radio-option">
-          <input type="radio" name="goal-delete-level" value="goal_only" checked>
-          <span>Goal record only (keep related memory)</span>
-        </label>
-        <label class="radio-option">
-          <input type="radio" name="goal-delete-level" value="goal_and_memory">
-          <span>Goal + related memory entries and actions</span>
-        </label>
-        <label class="radio-option">
-          <input type="radio" name="goal-delete-level" value="goal_and_memory_and_files">
-          <span>Goal + related memory + attached files</span>
-        </label>
       </div>
       <div class="modal-actions">
         <button class="btn" onclick="closeModal('modal-goal-delete')">Cancel</button>
+        <button class="btn" id="goal-archive-confirm">Archive</button>
         <button class="btn btn-danger" id="goal-delete-confirm">Delete Permanently</button>
       </div>
     </div>

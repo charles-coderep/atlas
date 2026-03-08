@@ -1,5 +1,5 @@
 const { updateSession, saveEntry, saveAction, saveOverride, getOpenActions, getActiveGoals } = require('./db');
-const { callClaude } = require('./orchestrator');
+const { callEngine } = require('./orchestrator');
 
 async function processSession(sessionId, conversationHistory, durationMinutes) {
   if (conversationHistory.length < 4) {
@@ -26,7 +26,16 @@ async function processSession(sessionId, conversationHistory, durationMinutes) {
   });
 
   // Deduplicate entries and actions together
-  const { entries, actions, overrides } = await deduplicateExtractions(rawEntries, rawActions);
+  let entries;
+  let actions;
+  let overrides;
+  if (rawEntries.length + rawActions.length <= 5) {
+    entries = rawEntries;
+    actions = rawActions;
+    overrides = rawEntries.filter((entry) => entry.entry_type === 'override');
+  } else {
+    ({ entries, actions, overrides } = await deduplicateExtractions(rawEntries, rawActions));
+  }
 
   // Check for duplicate actions against existing open actions
   const existingActions = await getOpenActions();
@@ -92,7 +101,7 @@ async function extractSummary(transcript) {
 ${transcript}`;
 
   try {
-    return await callClaude(prompt, 'You are a session summariser. Output only the summary text, nothing else.');
+    return await callEngine(prompt, 'You are a session summariser. Output only the summary text, nothing else.');
   } catch {
     return 'Summary generation failed.';
   }
@@ -119,7 +128,7 @@ Return ONLY a valid JSON array. No markdown, no explanation.
 ${transcript}`;
 
   try {
-    const result = await callClaude(prompt, 'You extract structured memory entries from conversations. Output only valid JSON arrays.');
+    const result = await callEngine(prompt, 'You extract structured memory entries from conversations. Output only valid JSON arrays.');
     const match = result.match(/\[[\s\S]*\]/);
     if (!match) return [];
     return JSON.parse(match[0]);
@@ -141,7 +150,7 @@ Return ONLY a valid JSON array.
 ${transcript}`;
 
   try {
-    const result = await callClaude(prompt, 'You extract action items from conversations. Output only valid JSON arrays.');
+    const result = await callEngine(prompt, 'You extract action items from conversations. Output only valid JSON arrays.');
     const match = result.match(/\[[\s\S]*\]/);
     if (!match) return [];
     return JSON.parse(match[0]);
@@ -176,7 +185,7 @@ Return ONLY a JSON object with three keys:
 }`;
 
   try {
-    const result = await callClaude(prompt, 'You deduplicate extracted data. Output only valid JSON.');
+    const result = await callEngine(prompt, 'You deduplicate extracted data. Output only valid JSON.');
     const match = result.match(/\{[\s\S]*\}/);
     if (!match) return { entries, actions, overrides: [] };
     const parsed = JSON.parse(match[0]);

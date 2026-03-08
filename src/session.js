@@ -5,7 +5,7 @@ const {
   getOpenActions, getOverdueActions, updateAction,
   searchEntries, getRecentSessions,
 } = require('./db');
-const { buildSystemPrompt, callClaude, callClaudeConversation, loadUserContext } = require('./orchestrator');
+const { buildSystemPrompt, callEngine, callEngineConversation, loadUserContext } = require('./orchestrator');
 const { processSession } = require('./processor');
 const { webSearch, processSearchMarkers } = require('./search');
 const { ingestFile, listFiles } = require('./files');
@@ -169,7 +169,7 @@ ${items.join('\n')}
 Generate a brief, direct opening check-in. For overdue items, ask if they happened or should be rescheduled. For stalled items (3+ follow-ups), diagnose the obstacle per your escalation protocol. Keep it conversational, not a guilt trip. 2-4 sentences max.`;
 
   try {
-    return await callClaude(prompt, systemPrompt);
+    return await callEngine(prompt, systemPrompt);
   } catch {
     return null;
   }
@@ -233,7 +233,7 @@ async function processMarkers(response, conversationHistory, systemPrompt) {
 
   // Single refinement call with all gathered context
   const refinedPrompt = `Here is the information you requested:\n\n${contextParts.join('\n\n---\n\n')}\n\nNow incorporate all of this into your advice. Cite what you found. Be specific. Reference past events naturally where relevant.`;
-  return await callClaudeConversation(refinedPrompt, systemPrompt, conversationHistory);
+  return await callEngineConversation(refinedPrompt, systemPrompt, conversationHistory);
 }
 
 // --- Main session ---
@@ -470,7 +470,7 @@ async function runSession(options = {}) {
 
       try {
         process.stdout.write('\n  Atlas: ');
-        let response = await callClaudeConversation(effectivePrompt, systemPrompt, conversationHistory.slice(0, -1));
+        let response = await callEngineConversation(effectivePrompt, systemPrompt, conversationHistory.slice(0, -1));
 
         // Process any [SEARCH:] or [RECALL:] markers in the response
         response = await processMarkers(response, conversationHistory, systemPrompt);

@@ -32,6 +32,8 @@ contextBridge.exposeInMainWorld('atlas', {
     getRecent: (days) => ipcRenderer.invoke('sessions:getRecent', days),
     create: (mode) => ipcRenderer.invoke('sessions:create', mode),
     update: (id, updates) => ipcRenderer.invoke('sessions:update', id, updates),
+    delete: (id) => ipcRenderer.invoke('sessions:delete', id),
+    deleteAll: () => ipcRenderer.invoke('sessions:deleteAll'),
   },
 
   // Entries
@@ -71,6 +73,7 @@ contextBridge.exposeInMainWorld('atlas', {
     send: (message) => ipcRenderer.invoke('chat:send', message),
     sendStreaming: (message) => ipcRenderer.invoke('chat:sendStreaming', message),
     end: () => ipcRenderer.invoke('chat:end'),
+    onProcessingStatus: (callback) => ipcRenderer.on('chat:processing-status', (_, status) => callback(status)),
     onStreamChunk: (callback) => ipcRenderer.on('chat:stream-chunk', (_, chunk) => callback(chunk)),
     onStreamEnd: (callback) => ipcRenderer.on('chat:stream-end', () => callback()),
     onStreamError: (callback) => ipcRenderer.on('chat:stream-error', (_, err) => callback(err)),
@@ -113,6 +116,15 @@ contextBridge.exposeInMainWorld('atlas', {
     save: (file, content) => ipcRenderer.invoke('context:save', file, content),
     checkPlaceholders: () => ipcRenderer.invoke('context:checkPlaceholders'),
     interview: (file, message, history) => ipcRenderer.invoke('context:interview', file, message, history),
+    interviewStreaming: (file, message, history) => ipcRenderer.invoke('context:interviewStreaming', file, message, history),
+    onStreamChunk: (callback) => ipcRenderer.on('context:stream-chunk', (_, chunk) => callback(chunk)),
+    onStreamEnd: (callback) => ipcRenderer.on('context:stream-end', () => callback()),
+    onStreamError: (callback) => ipcRenderer.on('context:stream-error', (_, err) => callback(err)),
+    removeStreamListeners: () => {
+      ipcRenderer.removeAllListeners('context:stream-chunk');
+      ipcRenderer.removeAllListeners('context:stream-end');
+      ipcRenderer.removeAllListeners('context:stream-error');
+    },
   },
 
   // Settings
@@ -131,6 +143,7 @@ contextBridge.exposeInMainWorld('atlas', {
     setEngine: (name) => ipcRenderer.invoke('settings:setEngine', name),
     getTones: () => ipcRenderer.invoke('settings:getTones'),
     setTone: (name) => ipcRenderer.invoke('settings:setTone', name),
+    resetAll: () => ipcRenderer.invoke('settings:resetAll'),
   },
 
   // Health
@@ -147,7 +160,16 @@ contextBridge.exposeInMainWorld('atlas', {
   interview: {
     start: (options) => ipcRenderer.invoke('interview:start', options),
     send: (message) => ipcRenderer.invoke('interview:send', message),
+    sendStreaming: (message) => ipcRenderer.invoke('interview:sendStreaming', message),
     complete: () => ipcRenderer.invoke('interview:complete'),
     structure: (answers) => ipcRenderer.invoke('interview:structure', answers),
+    onStreamChunk: (callback) => ipcRenderer.on('interview:stream-chunk', (_, chunk) => callback(chunk)),
+    onStreamEnd: (callback) => ipcRenderer.on('interview:stream-end', () => callback()),
+    onStreamError: (callback) => ipcRenderer.on('interview:stream-error', (_, err) => callback(err)),
+    removeStreamListeners: () => {
+      ipcRenderer.removeAllListeners('interview:stream-chunk');
+      ipcRenderer.removeAllListeners('interview:stream-end');
+      ipcRenderer.removeAllListeners('interview:stream-error');
+    },
   },
 });

@@ -207,6 +207,27 @@ async function getRecentSessions(days = 7) {
   return data;
 }
 
+async function cleanupEmptySessions(days = 30) {
+  const db = getClient();
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - days);
+  const cutoffStr = cutoff.toISOString().split('T')[0];
+
+  const { data, error } = await db
+    .from('sessions')
+    .delete()
+    .lt('date', cutoffStr)
+    .or('summary.is.null,summary.eq.')
+    .select('id');
+
+  if (error) throw error;
+  return (data || []).length;
+}
+
+async function cleanupOldSessions(days = 30) {
+  return cleanupEmptySessions(days);
+}
+
 // --- Entries ---
 
 async function saveEntry(entry) {
@@ -241,6 +262,23 @@ async function getPersistentEntries() {
 
   if (error) throw error;
   return data;
+}
+
+async function cleanupOldEntries(days = 7) {
+  const db = getClient();
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - days);
+  const cutoffStr = cutoff.toISOString();
+
+  const { data, error } = await db
+    .from('entries')
+    .delete()
+    .eq('is_persistent', false)
+    .lt('created_at', cutoffStr)
+    .select('id');
+
+  if (error) throw error;
+  return (data || []).length;
 }
 
 async function getEntriesByGoal(goalId, days = 7) {
@@ -363,6 +401,27 @@ async function getFiles() {
   return data;
 }
 
+async function resetAllData() {
+  const db = getClient();
+  const tableConfigs = [
+    { table: 'entries', dateCol: 'created_at' },
+    { table: 'actions', dateCol: 'created_at' },
+    { table: 'overrides', dateCol: 'created_at' },
+    { table: 'files', dateCol: 'uploaded_at' },
+    { table: 'sessions', dateCol: 'created_at' },
+    { table: 'goals', dateCol: 'created_at' },
+  ];
+
+  for (const { table, dateCol } of tableConfigs) {
+    const { error } = await db
+      .from(table)
+      .delete()
+      .gte(dateCol, '1970-01-01T00:00:00Z');
+
+    if (error) throw new Error(`Failed to clear ${table}: ${error.message}`);
+  }
+}
+
 // --- Search entries by keyword ---
 
 async function searchEntries(keywords, limit = 10) {
@@ -422,13 +481,29 @@ async function getAllOverrides() {
   return data;
 }
 
+async function deleteSession(id) {
+  const db = getClient();
+  // Unlink entries from this session (don't delete them — they may have standalone value)
+  await db.from('entries').update({ session_id: null }).eq('session_id', id);
+  const { error } = await db.from('sessions').delete().eq('id', id);
+  if (error) throw error;
+}
+
+async function deleteAllSessions() {
+  const db = getClient();
+  // Unlink all session-linked entries first
+  await db.from('entries').update({ session_id: null }).not('session_id', 'is', null);
+  const { error } = await db.from('sessions').delete().gte('created_at', '1970-01-01T00:00:00Z');
+  if (error) throw error;
+}
+
 module.exports = {
   initDB, getClient,
   saveGoal, getActiveGoals, getGoal, updateGoalStatus, getAllGoals, archiveGoal, unarchiveGoal, getArchivedGoals, countGoalLinkedItems, deleteGoalCascade,
-  createSession, updateSession, getRecentSessions,
-  saveEntry, getRecentEntries, getPersistentEntries, getEntriesByGoal, getEntriesByType,
+  createSession, updateSession, getRecentSessions, cleanupEmptySessions, cleanupOldSessions, deleteSession, deleteAllSessions,
+  saveEntry, getRecentEntries, getPersistentEntries, cleanupOldEntries, getEntriesByGoal, getEntriesByType,
   saveAction, getOpenActions, updateAction, getOverdueActions, getCompletedActions, getAllActions,
   getEntriesBySession,
   saveOverride, getUnresolvedOverrides, updateOverride, getAllOverrides,
-  saveFile, getFiles, searchEntries,
+  saveFile, getFiles, resetAllData, searchEntries,
 };

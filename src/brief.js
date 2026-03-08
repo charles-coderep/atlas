@@ -1,5 +1,5 @@
 const { getActiveGoals, getOpenActions, getOverdueActions, getFiles } = require('./db');
-const { buildSystemPrompt, callClaude } = require('./orchestrator');
+const { buildSystemPrompt, callEngine } = require('./orchestrator');
 
 async function generateBrief(options = {}) {
   const goals = await getActiveGoals();
@@ -69,7 +69,7 @@ Keep it scannable. Under 3 minutes to read. Reference specific past events and c
   console.log('  ============================================\n');
 
   try {
-    const brief = await callClaude(briefPrompt, systemPrompt);
+    const brief = await callEngine(briefPrompt, systemPrompt);
     console.log(`  ${brief.split('\n').join('\n  ')}\n`);
     return brief;
   } catch (err) {
