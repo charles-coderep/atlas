@@ -638,12 +638,24 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
     return loadUserContext();
   });
 
-  ipcMain.handle('context:save', (_, file, content) => {
+  ipcMain.handle('context:save', async (_, file, content) => {
     const fs = require('fs');
     const configDir = path.join(__dirname, '..', 'config', 'user');
     const validFiles = ['IDENTITY.md', 'SITUATION.md', 'PREFERENCES.md'];
     if (!validFiles.includes(file)) throw new Error('Invalid context file');
     fs.writeFileSync(path.join(configDir, file), content, 'utf-8');
+
+    // If a session is active, rebuild the system prompt so Atlas sees the update immediately
+    if (chatSession) {
+      try {
+        const goals = await db.getActiveGoals();
+        const { buildSystemPrompt } = require('../src/orchestrator');
+        chatSystemPrompt = await buildSystemPrompt(goals);
+        console.log('[Context] System prompt rebuilt mid-session after file update');
+      } catch (err) {
+        console.error('[Context] Failed to rebuild prompt mid-session:', err.message);
+      }
+    }
   });
 
   ipcMain.handle('context:checkPlaceholders', () => {
