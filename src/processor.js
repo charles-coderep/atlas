@@ -1,6 +1,12 @@
 const { updateSession, saveEntry, saveAction, saveOverride, getOpenActions, getActiveGoals } = require('./db');
 const { callEngine } = require('./orchestrator');
 
+const EXTRACTION_RUBRIC = `Rules for extraction:
+- Be concise. Short, factual descriptions over verbose explanations.
+- Preserve uncertainty. If something was tentative, mark it as such.
+- Do not overstate confidence or importance.
+- Only extract items worth remembering — not every sentence is an entry.`;
+
 async function processSession(sessionId, conversationHistory, durationMinutes) {
   if (conversationHistory.length < 4) {
     // Fewer than 2 exchanges (user + atlas = 2 messages per exchange)
@@ -98,6 +104,8 @@ async function processSession(sessionId, conversationHistory, durationMinutes) {
 async function extractSummary(transcript) {
   const prompt = `Summarise this advisory session in 3-5 sentences. Capture: what was discussed, what was decided, what commitments were made, and any notable patterns or insights. Be concise and factual.
 
+${EXTRACTION_RUBRIC}
+
 ${transcript}`;
 
   try {
@@ -123,6 +131,8 @@ For entries with entry_type "override" (user disagreed with Atlas), also include
 
 Only extract items worth remembering. Not every sentence is an entry. Focus on decisions, commitments, insights, and patterns.
 
+${EXTRACTION_RUBRIC}
+
 Return ONLY a valid JSON array. No markdown, no explanation.
 
 ${transcript}`;
@@ -144,6 +154,8 @@ async function extractActions(transcript, goalIds) {
 - "due_date": YYYY-MM-DD if mentioned or inferable, otherwise null
 
 Only include concrete, actionable commitments. Not vague intentions.
+
+${EXTRACTION_RUBRIC}
 
 Return ONLY a valid JSON array.
 

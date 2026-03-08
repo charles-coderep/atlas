@@ -136,6 +136,46 @@ atlas/
 - Do not treat Whisper fallback as a requirement
 - Do not introduce engine-specific product behaviour unless explicitly requested. If Claude and Codex differ in behaviour, treat that as an implementation gap to close.
 
+## Prompt & Instruction Governance
+
+Atlas's advisory quality is a direct function of prompt clarity. Every file, prompt string, and markdown document that gives the AI direction has a direct impact on the end user. Treat these surfaces with the same discipline as production code.
+
+### Before editing any AI-facing instruction:
+
+1. **Search first.** Run `grep -rn "keyword" electron/ src/ config/` to find every place the topic is already addressed. If the rule exists — even in different words — do not add it again.
+2. **Edit, don't append.** If something contradicts, rewrite it in place. If something is incomplete, amend where it logically belongs. Never blindly append to the bottom of a file or prompt string.
+3. **Read the whole file first.** Understand the structure, flow, and what has already been said before changing any part of it.
+4. **Re-read after editing.** Verify nothing now clashes or repeats.
+5. **One rule, one location.** If a rule needs to exist, it lives in exactly one place. Other files reference or defer to it — they do not restate it.
+
+### Prompt hierarchy — single source of truth:
+
+| Concern | Authority | Other files should... |
+|---|---|---|
+| Atlas personality & core behaviour | `buildSystemPrompt()` in `orchestrator.js` | ...not restate personality rules |
+| Advisory methodology | `config/engine/methodology.md` | ...not duplicate methodology guidance |
+| Tone/style | `config/tone/*.md` | ...not include tone instructions |
+| Goal interview behaviour | `buildGoalInterviewPrompt()` in `main.js` | ...not have separate interview rules |
+| Context file editing | `buildContextInterviewPrompt()` in `main.js` | ...not have separate context rules |
+| Perspective specs | `config/agents/*.md` | ...not describe perspectives elsewhere |
+| Output format markers | The specific handler that needs them | ...not leak format markers into personality prompts |
+
+### What counts as an AI-facing instruction:
+
+- System prompt strings in JS (orchestrator, main.js handlers)
+- Markdown files loaded into prompts (methodology, tone, agent specs)
+- contextFileGuidance objects
+- Task-specific prompts (extraction, search, brief generation)
+- Any string that will be read by the AI engine as part of its instructions
+
+### Red flags that indicate a governance violation:
+
+- The same rule appears in two files in different words
+- A new rule is appended to the bottom of a long prompt without checking what's above it
+- A task-specific prompt restates Atlas's identity from scratch
+- A tone instruction appears outside of `config/tone/*.md`
+- Format/protocol markers (GOAL_READY, CONTEXT_READY) appear in personality sections
+
 ## Working On This Project
 
 1. Read this file first
