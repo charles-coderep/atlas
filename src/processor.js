@@ -20,13 +20,16 @@ async function processSession(sessionId, conversationHistory, durationMinutes, o
 
   if (onProgress) onProgress('Summarising conversation and extracting insights...');
 
-  // Run summary, entry extraction, action extraction, and decision extraction in parallel
-  const [summary, rawEntries, rawActions, rawDecisions] = await Promise.all([
-    extractSummary(transcript),
-    extractEntries(transcript, goalIds),
-    extractActions(transcript, goalIds),
-    extractDecisions(transcript, goalIds),
+  // Run combined extractions in parallel (2 CLI calls instead of 4)
+  const [summaryAndEntries, actionsAndDecisions] = await Promise.all([
+    extractSummaryAndEntries(transcript, goalIds),
+    extractActionsAndDecisions(transcript, goalIds),
   ]);
+
+  const summary = summaryAndEntries.summary;
+  const rawEntries = summaryAndEntries.entries;
+  const rawActions = actionsAndDecisions.actions;
+  const rawDecisions = actionsAndDecisions.decisions;
 
   // Save session summary
   await updateSession(sessionId, {
@@ -40,7 +43,7 @@ async function processSession(sessionId, conversationHistory, durationMinutes, o
   let entries;
   let actions;
   let overrides;
-  if (rawEntries.length + rawActions.length <= 5) {
+  if (rawEntries.length + rawActions.length <= 10) {
     entries = rawEntries;
     actions = rawActions;
     overrides = rawEntries.filter((entry) => entry.entry_type === 'override');
@@ -127,22 +130,14 @@ async function processSession(sessionId, conversationHistory, durationMinutes, o
   return { entries: entryCount, actions: actionCount, decisions: decisionCount };
 }
 
-async function extractSummary(transcript) {
-  const prompt = `Summarise this advisory session in 3-5 sentences. Capture: what was discussed, what was decided, what commitments were made, and any notable patterns or insights. Be concise and factual.
+async function extractSummaryAndEntries(transcript, goalIds) {
+  const prompt = `You are processing an advisory session transcript. Produce TWO outputs in a single response.
 
-${EXTRACTION_RUBRIC}
+PART 1 — SESSION SUMMARY:
+Summarise this session in 3-5 sentences. Capture: what was discussed, what was decided, what commitments were made, and any notable patterns or insights. Be concise and factual.
 
-${transcript}`;
-
-  try {
-    return await callEngine(prompt, 'You are a session summariser. Output only the summary text, nothing else.');
-  } catch {
-    return 'Summary generation failed.';
-  }
-}
-
-async function extractEntries(transcript, goalIds) {
-  const prompt = `Review this conversation and extract the important items as a JSON array. Each item should have:
+PART 2 — MEMORY ENTRIES:
+Extract important items as a JSON array. Each item should have:
 - "domain": one of career, finances, learning, health, business, personal, meta
 - "entry_type": one of insight, decision, commitment, pattern, alert, data_point, breakthrough, override
 - "content": a concise description of the item
@@ -159,41 +154,104 @@ Only extract items worth remembering. Not every sentence is an entry. Focus on d
 
 ${EXTRACTION_RUBRIC}
 
-Return ONLY a valid JSON array. No markdown, no explanation.
+RESPONSE FORMAT — use exactly this structure:
+
+SUMMARY:
+[your 3-5 sentence summary here]
+
+ENTRIES_JSON:
+[your JSON array here]
 
 ${transcript}`;
 
   try {
-    const result = await callEngine(prompt, 'You extract structured memory entries from conversations. Output only valid JSON arrays.');
-    const match = result.match(/\[[\s\S]*\]/);
-    if (!match) return [];
-    return JSON.parse(match[0]);
-  } catch {
-    return [];
+    const result = await callEngine(prompt, 'You extract session summaries and memory entries. Follow the response format exactly.');
+
+    // Parse summary
+    let summary = 'Summary generation failed.';
+    const summaryMatch = result.match(/SUMMARY:\s*\n([\s\S]*?)(?=\nENTRIES_JSON:)/);
+    if (summaryMatch) {
+      summary = summaryMatch[1].trim();
+    }
+
+    // Parse entries
+    let entries = [];
+    const entriesMatch = result.match(/ENTRIES_JSON:\s*\n([\s\S]*)/);
+    if (entriesMatch) {
+      const jsonMatch = entriesMatch[1].match(/\[[\s\S]*\]/);
+      if (jsonMatch) {
+        entries = JSON.parse(jsonMatch[0]);
+      }
+    }
+
+    return { summary, entries };
+  } catch (err) {
+    console.error('[Processor] Summary+entries extraction failed:', err.message);
+    return { summary: 'Summary generation failed.', entries: [] };
   }
 }
 
-async function extractActions(transcript, goalIds) {
-  const prompt = `Review this conversation and extract any commitments or action items the user made or agreed to. Return a JSON array where each item has:
+async function extractActionsAndDecisions(transcript, goalIds) {
+  const prompt = `You are processing an advisory session transcript. Extract TWO types of items in a single response.
+
+PART 1 — ACTION ITEMS:
+Extract any commitments or action items the user made or agreed to. Each item should have:
 - "description": what needs to be done
 - "goal_id": relevant goal ID from [${goalIds}], or null
 - "due_date": YYYY-MM-DD if mentioned or inferable, otherwise null
 
 Only include concrete, actionable commitments. Not vague intentions.
 
+PART 2 — STRATEGIC DECISIONS:
+Extract any significant decisions that were made or confirmed. A decision is different from an action — it is a choice between alternatives that affects strategy. Each item should have:
+- "description": what was decided
+- "alternatives": what other options were considered (or "none discussed")
+- "expected_outcome": what the user/Atlas expects to happen as a result
+- "atlas_confidence": "high", "medium", or "low"
+- "goal_id": relevant goal ID from [${goalIds}], or null
+- "follow_up_date": YYYY-MM-DD — when to check how this decision played out (typically 1-4 weeks)
+
+Only extract genuine decisions, not routine actions. "Applied to 3 jobs" is an action. "Decided to focus on React roles over full-stack" is a decision.
+
 ${EXTRACTION_RUBRIC}
 
-Return ONLY a valid JSON array.
+RESPONSE FORMAT — use exactly this structure:
+
+ACTIONS_JSON:
+[your JSON array of actions here]
+
+DECISIONS_JSON:
+[your JSON array of decisions here]
 
 ${transcript}`;
 
   try {
-    const result = await callEngine(prompt, 'You extract action items from conversations. Output only valid JSON arrays.');
-    const match = result.match(/\[[\s\S]*\]/);
-    if (!match) return [];
-    return JSON.parse(match[0]);
-  } catch {
-    return [];
+    const result = await callEngine(prompt, 'You extract action items and strategic decisions. Follow the response format exactly.');
+
+    // Parse actions
+    let actions = [];
+    const actionsMatch = result.match(/ACTIONS_JSON:\s*\n([\s\S]*?)(?=\nDECISIONS_JSON:)/);
+    if (actionsMatch) {
+      const jsonMatch = actionsMatch[1].match(/\[[\s\S]*\]/);
+      if (jsonMatch) {
+        actions = JSON.parse(jsonMatch[0]);
+      }
+    }
+
+    // Parse decisions
+    let decisions = [];
+    const decisionsMatch = result.match(/DECISIONS_JSON:\s*\n([\s\S]*)/);
+    if (decisionsMatch) {
+      const jsonMatch = decisionsMatch[1].match(/\[[\s\S]*\]/);
+      if (jsonMatch) {
+        decisions = JSON.parse(jsonMatch[0]);
+      }
+    }
+
+    return { actions, decisions };
+  } catch (err) {
+    console.error('[Processor] Actions+decisions extraction failed:', err.message);
+    return { actions: [], decisions: [] };
   }
 }
 
@@ -251,35 +309,6 @@ async function filterDuplicateActions(newActions, existingActions) {
       existing.includes(desc) || desc.includes(existing)
     );
   });
-}
-
-async function extractDecisions(transcript, goalIds) {
-  const prompt = `Review this conversation and extract any significant decisions that were made or confirmed. A decision is different from an action — it is a choice between alternatives that affects strategy.
-
-For each decision, return a JSON array with:
-- "description": what was decided
-- "alternatives": what other options were considered (or "none discussed")
-- "expected_outcome": what the user/Atlas expects to happen as a result
-- "atlas_confidence": "high", "medium", or "low"
-- "goal_id": relevant goal ID from [${goalIds}], or null
-- "follow_up_date": YYYY-MM-DD — when to check how this decision played out (typically 1-4 weeks)
-
-Only extract genuine decisions, not routine actions. "Applied to 3 jobs" is an action. "Decided to focus on React roles over full-stack" is a decision.
-
-${EXTRACTION_RUBRIC}
-
-Return ONLY a valid JSON array.
-
-${transcript}`;
-
-  try {
-    const result = await callEngine(prompt, 'You extract strategic decisions from conversations. Output only valid JSON arrays.');
-    const match = result.match(/\[[\s\S]*\]/);
-    if (!match) return [];
-    return JSON.parse(match[0]);
-  } catch {
-    return [];
-  }
 }
 
 async function generateUserModel(recentSessions, persistentEntries, existingModel) {
@@ -432,4 +461,4 @@ async function runPatternDetection() {
   }
 }
 
-module.exports = { processSession, extractDecisions, generateUserModel, runUserModelGeneration, detectPatterns, runPatternDetection };
+module.exports = { processSession, generateUserModel, runUserModelGeneration, detectPatterns, runPatternDetection };
