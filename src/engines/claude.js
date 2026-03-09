@@ -20,10 +20,24 @@ class ClaudeEngine extends BaseEngine {
     return candidates.find((candidate) => !path.isAbsolute(candidate) || fs.existsSync(candidate)) || 'claude';
   }
 
-  _buildArgs(systemPrompt, options = {}) {
+  _writeSystemPromptFile(systemPrompt) {
+    if (!systemPrompt) return null;
+    const tmpPath = path.join(os.tmpdir(), `atlas-sp-${Date.now()}-${Math.random().toString(16).slice(2)}.txt`);
+    fs.writeFileSync(tmpPath, systemPrompt, 'utf-8');
+    return tmpPath;
+  }
+
+  _cleanupFile(filePath) {
+    try { if (filePath) fs.unlinkSync(filePath); } catch {}
+  }
+
+  _buildArgs(systemPromptFile, options = {}) {
     const args = ['--print'];
     args.push('--model', options.model || this.preferredModel);
-    if (systemPrompt) args.push('--system-prompt', systemPrompt);
+    // Use --system-prompt-file to avoid ENAMETOOLONG on Windows.
+    // The previous --system-prompt flag passed the entire prompt as a CLI
+    // argument which exceeds the OS command-line length limit (~32K chars).
+    if (systemPromptFile) args.push('--system-prompt-file', systemPromptFile);
     args.push('--tools', '');
     if (options.allowedTools && options.allowedTools.length > 0) {
       args.push('--allowedTools', ...options.allowedTools);
@@ -36,8 +50,9 @@ class ClaudeEngine extends BaseEngine {
   }
 
   async send(prompt, systemPrompt, options = {}) {
+    const spFile = this._writeSystemPromptFile(systemPrompt);
     return new Promise((resolve, reject) => {
-      const args = this._buildArgs(systemPrompt, options);
+      const args = this._buildArgs(spFile, options);
       const proc = spawn(this._bin(), args, { env: this._env(), windowsHide: true });
 
       let stdout = '';
@@ -47,6 +62,7 @@ class ClaudeEngine extends BaseEngine {
       proc.stderr.on('data', (data) => { stderr += data; });
 
       proc.on('close', (code) => {
+        this._cleanupFile(spFile);
         if (code !== 0) {
           reject(new Error(`Active AI engine (${this.name}) exited with code ${code}: ${stderr}`));
         } else {
@@ -55,6 +71,7 @@ class ClaudeEngine extends BaseEngine {
       });
 
       proc.on('error', (err) => {
+        this._cleanupFile(spFile);
         reject(new Error(`Failed to start active AI engine (${this.name}): ${err.message}`));
       });
 
@@ -64,8 +81,9 @@ class ClaudeEngine extends BaseEngine {
   }
 
   async sendStreaming(prompt, systemPrompt, options = {}, onChunk) {
+    const spFile = this._writeSystemPromptFile(systemPrompt);
     return new Promise((resolve, reject) => {
-      const args = this._buildArgs(systemPrompt, options);
+      const args = this._buildArgs(spFile, options);
       const proc = spawn(this._bin(), args, { env: this._env(), windowsHide: true });
 
       let fullOutput = '';
@@ -80,6 +98,7 @@ class ClaudeEngine extends BaseEngine {
       proc.stderr.on('data', (data) => { stderr += data; });
 
       proc.on('close', (code) => {
+        this._cleanupFile(spFile);
         if (code !== 0) {
           reject(new Error(`Active AI engine (${this.name}) exited with code ${code}: ${stderr}`));
         } else {
@@ -88,6 +107,7 @@ class ClaudeEngine extends BaseEngine {
       });
 
       proc.on('error', (err) => {
+        this._cleanupFile(spFile);
         reject(new Error(`Failed to start active AI engine (${this.name}): ${err.message}`));
       });
 

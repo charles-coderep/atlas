@@ -502,7 +502,14 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('chat:processing-status', 'Extracting session insights...');
         }
-        result = await processSession(chatSession.id, chatHistory, duration);
+        const sendProgress = (msg) => {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('chat:processing-status', msg);
+          }
+        };
+        sendProgress('Processing session — this takes 15-30 seconds...');
+        result = await processSession(chatSession.id, chatHistory, duration, sendProgress);
+        sendProgress('Session saved.');
 
         // Check if user model / pattern detection should run (every 5 sessions)
         try {

@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const {
   getRecentSessions, getOpenActions, getOverdueActions,
-  getPersistentEntries, getRecentEntries,
+  getPersistentEntries, getRecentEntries, getFiles,
 } = require('./db');
 
 const crypto = require('crypto');
@@ -452,6 +452,33 @@ async function buildSystemPrompt(goals, options = {}) {
   const sourcePolicy = getGoalSourcePolicy(goals);
   const sourceExclusions = getExcludedByGoal(goals);
 
+  // Load uploaded files linked to active goals
+  let fileContextBlock = '';
+  if (sourcePolicy.files !== false) {
+    try {
+      const allFiles = await getFiles();
+      const activeGoalIds = goals.map(g => g.id);
+      const relevantFiles = allFiles.filter(f => {
+        if (!f.goal_id) return true; // Global files always included
+        return activeGoalIds.includes(f.goal_id);
+      });
+
+      if (relevantFiles.length > 0) {
+        const MAX_FILE_CHARS = 2000;
+        const fileSummaries = relevantFiles.map(f => {
+          const content = f.content && f.content.length > MAX_FILE_CHARS
+            ? f.content.substring(0, MAX_FILE_CHARS) + '\n...[truncated — full file available via [RECALL: ' + f.filename + ']]'
+            : f.content || '[empty file]';
+          const goalLabel = f.goal_id ? ` (goal: ${f.goal_id})` : ' (global)';
+          return `### ${f.filename}${goalLabel}\n${content}`;
+        });
+        fileContextBlock = `\n\n## Uploaded Files [user-provided]\nThe user uploaded these files for Atlas to reference. Use this content when relevant to the conversation.\n\n${fileSummaries.join('\n\n')}`;
+      }
+    } catch (err) {
+      console.error('[Files] Failed to load into context:', err.message);
+    }
+  }
+
   const calendarData = sourcePolicy.calendar ? (options.calendarData || null) : null;
   const emailData = sourcePolicy.gmail ? (options.emailData || null) : null;
   const extraContext = options.extraContext || '';
@@ -510,6 +537,7 @@ Consider each of these perspectives when forming your response, but present a si
 ${agentSpecs.map(s => s.content).join('\n\n---\n\n')}
 ${methodology ? `\n\n## Advisory Methodology\n${methodology}` : ''}
 ${extraContext ? `\n## Additional Context\n${extraContext}` : ''}
+${fileContextBlock}
 
 ## Memory Source Labels
 Context marked [user-maintained] was written by the user. Context marked [auto-captured] was extracted automatically from sessions. Context marked [AI-suggested] was proposed by Atlas and approved by the user. Treat user-maintained facts as ground truth. Treat auto-captured context as reliable but possibly incomplete. Note the source when relevant to your advice.`;
@@ -584,6 +612,7 @@ Context marked [user-maintained] was written by the user. Context marked [auto-c
       calendarEvents: calendarData ? (calendarData.today || []).length : 0,
       emailTriaged: emailData ? (emailData.triageCount || 0) : 0,
       emailDeepRead: emailData ? (emailData.deepReadCount || 0) : 0,
+      filesLoaded: fileContextBlock ? 1 : 0,
     },
     sourcePolicy,
     sourceExclusions,

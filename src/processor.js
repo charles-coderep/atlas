@@ -7,7 +7,7 @@ const EXTRACTION_RUBRIC = `Rules for extraction:
 - Do not overstate confidence or importance.
 - Only extract items worth remembering — not every sentence is an entry.`;
 
-async function processSession(sessionId, conversationHistory, durationMinutes) {
+async function processSession(sessionId, conversationHistory, durationMinutes, onProgress) {
   if (conversationHistory.length < 4) {
     // Fewer than 2 exchanges (user + atlas = 2 messages per exchange)
     await updateSession(sessionId, { duration_minutes: durationMinutes });
@@ -17,6 +17,8 @@ async function processSession(sessionId, conversationHistory, durationMinutes) {
   const transcript = conversationHistory.map((m) => `${m.role}: ${m.content}`).join('\n\n');
   const goals = await getActiveGoals();
   const goalIds = goals.map((g) => `${g.id}: ${g.title}`).join(', ');
+
+  if (onProgress) onProgress('Summarising conversation and extracting insights...');
 
   // Run summary, entry extraction, action extraction, and decision extraction in parallel
   const [summary, rawEntries, rawActions, rawDecisions] = await Promise.all([
@@ -31,6 +33,8 @@ async function processSession(sessionId, conversationHistory, durationMinutes) {
     summary,
     duration_minutes: durationMinutes,
   });
+
+  if (onProgress) onProgress(`Extracted ${rawEntries.length} entries, ${rawActions.length} actions, ${rawDecisions.length} decisions. Deduplicating...`);
 
   // Deduplicate entries and actions together
   let entries;
@@ -47,6 +51,8 @@ async function processSession(sessionId, conversationHistory, durationMinutes) {
   // Check for duplicate actions against existing open actions
   const existingActions = await getOpenActions();
   const newActions = await filterDuplicateActions(actions, existingActions);
+
+  if (onProgress) onProgress('Saving to database...');
 
   // Save entries
   let entryCount = 0;
