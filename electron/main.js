@@ -112,7 +112,7 @@ function registerIPC() {
 
   // --- Shared prompt builders ---
 
-  function buildGoalInterviewPrompt(cleanName) {
+  function buildGoalInterviewPrompt(cleanName, existingGoal) {
     return `You are Atlas, a strategic adviser helping define a goal. Warm, direct, personable.
 
 Rules:
@@ -132,7 +132,7 @@ When you have enough, present a natural-language summary and ask for confirmatio
 
 After confirmation, respond with GOAL_READY on its own line, then your confirmation. Include a PERSPECTIVES: line with comma-separated lowercase-hyphenated slugs (invisible to user, used by the system).
 
-Available defaults by type: ${JSON.stringify(AGENT_DEFAULTS_BY_TYPE)}. Meta-analyst always included.`;
+Available defaults by type: ${JSON.stringify(AGENT_DEFAULTS_BY_TYPE)}. Meta-analyst always included.${existingGoal ? `\n\nThis is an EDIT session for an existing goal. Current goal data:\n${Object.entries(existingGoal.goal_data || {}).filter(([k, v]) => v && k !== 'atlas_directness').map(([k, v]) => `- ${k.replace(/_/g, ' ')}: ${v}`).join('\n')}\n\nKeep this context throughout the conversation. The user is updating this goal, not creating a new one.` : ''}`;
   }
 
   function buildContextInterviewPrompt(file, info, guidance) {
@@ -228,9 +228,37 @@ Gather information through conversation. When you have enough, start your respon
     if (goals.length === 0) return null;
 
     const sourcePolicy = getGoalSourcePolicy(goals);
+
+    // Re-fetch fresh email and calendar data for the brief
     const filteredOptions = { ...(options || {}) };
-    if (!sourcePolicy.calendar) delete filteredOptions.calendarData;
-    if (!sourcePolicy.gmail) delete filteredOptions.emailData;
+    if (sourcePolicy.gmail) {
+      try {
+        const gmail = require('../src/integrations/gmail');
+        if (gmail.isConfigured()) {
+          const openActions = await db.getOpenActions();
+          const recentEntries = await db.getRecentEntries(7);
+          const emailData = await gmail.fetchEmailContext(goals, openActions, recentEntries);
+          if (emailData) filteredOptions.emailData = emailData;
+        }
+      } catch (err) {
+        console.error('[Brief] Email fetch failed:', err.message);
+      }
+    } else {
+      delete filteredOptions.emailData;
+    }
+    if (sourcePolicy.calendar) {
+      try {
+        const cal = require('../src/integrations/calendar');
+        if (cal.isConfigured()) {
+          const calData = await cal.fetchCalendarEvents();
+          if (calData) filteredOptions.calendarData = calData;
+        }
+      } catch (err) {
+        console.error('[Brief] Calendar fetch failed:', err.message);
+      }
+    } else {
+      delete filteredOptions.calendarData;
+    }
 
     const promptStartedAt = Date.now();
     const systemPrompt = await buildSystemPrompt(goals, filteredOptions);
@@ -301,8 +329,31 @@ Keep it scannable. Under 3 minutes to read. Reference specific past events and c
     const goals = await db.getActiveGoals();
     if (goals.length === 0) return { error: 'No active goals. Create a goal first.' };
 
+    // Re-fetch fresh email and calendar data for this session
+    const freshOptions = { ...(options || {}) };
+    try {
+      const gmail = require('../src/integrations/gmail');
+      if (gmail.isConfigured()) {
+        const openActions = await db.getOpenActions();
+        const recentEntries = await db.getRecentEntries(7);
+        const emailData = await gmail.fetchEmailContext(goals, openActions, recentEntries);
+        if (emailData) freshOptions.emailData = emailData;
+      }
+    } catch (err) {
+      console.error('[Chat] Email fetch failed:', err.message);
+    }
+    try {
+      const cal = require('../src/integrations/calendar');
+      if (cal.isConfigured()) {
+        const calData = await cal.fetchCalendarEvents();
+        if (calData) freshOptions.calendarData = calData;
+      }
+    } catch (err) {
+      console.error('[Chat] Calendar fetch failed:', err.message);
+    }
+
     const promptStartedAt = Date.now();
-    chatSystemPrompt = await buildSystemPrompt(goals, options || {});
+    chatSystemPrompt = await buildSystemPrompt(goals, freshOptions);
     logTiming('System prompt built', promptStartedAt);
     chatHistory = [];
     chatSession = await db.createSession('advisory');
@@ -821,6 +872,7 @@ Under 2 minutes to read. No fluff. Reference specific actions and sessions.`;
   let interviewHistory = [];
   let interviewMode = null; // 'create' | 'edit'
   let interviewGoalId = null;
+  let interviewGoalData = null;
   let interviewSending = false;
 
   ipcMain.handle('interview:start', async (_, options) => {
@@ -838,6 +890,7 @@ Under 2 minutes to read. No fluff. Reference specific actions and sessions.`;
     if (interviewMode === 'edit' && interviewGoalId) {
       const goal = await db.getGoal(interviewGoalId);
       if (!goal) return { error: 'Goal not found' };
+      interviewGoalData = goal;
       const data = goal.goal_data || {};
       const summary = Object.entries(data)
         .filter(([k, v]) => v && k !== 'atlas_directness')
@@ -874,7 +927,7 @@ Under 2 minutes to read. No fluff. Reference specific actions and sessions.`;
     const streaming = options.streaming !== false; // default to streaming
 
     try {
-      const systemPrompt = buildGoalInterviewPrompt('');
+      const systemPrompt = buildGoalInterviewPrompt('', interviewGoalData);
       let response;
 
       if (streaming) {
@@ -995,6 +1048,7 @@ Return ONLY valid JSON. No explanation.`;
     interviewHistory = [];
     interviewMode = null;
     interviewGoalId = null;
+    interviewGoalData = null;
 
     return { id, title: goalData.title, goalData };
   });

@@ -2444,6 +2444,7 @@ async function switchEngine(name) {
 let whisperAvailable = false;
 let mediaRecorder = null;
 let audioChunks = [];
+let voiceLocked = false; // true when mic is locked on (hands-free mode)
 
 async function initVoice() {
   // Check if local Whisper is available
@@ -2468,12 +2469,64 @@ async function initVoice() {
   for (const [btnId, inputId] of micWiring) {
     const btn = document.getElementById(btnId);
     if (!btn) continue;
-    btn.addEventListener('mousedown', () => startVoice(inputId));
-    btn.addEventListener('mouseup', stopVoice);
-    btn.addEventListener('mouseleave', stopVoice);
-    btn.addEventListener('touchstart', (e) => { e.preventDefault(); startVoice(inputId); });
-    btn.addEventListener('touchend', (e) => { e.preventDefault(); stopVoice(); });
+
+    let draggedOff = false;
+
+    btn.addEventListener('mousedown', (e) => {
+      if (voiceLocked) { unlockVoice(); return; }
+      draggedOff = false;
+      startVoice(inputId);
+    });
+    btn.addEventListener('mouseup', () => {
+      if (voiceLocked) return;
+      if (!draggedOff) stopVoice(); // normal click-release = push-to-talk
+    });
+    btn.addEventListener('mouseleave', () => {
+      if (!isRecording || voiceLocked) return;
+      // Dragged off the button while holding — lock the mic on
+      draggedOff = true;
+      lockVoice(inputId);
+    });
+    btn.addEventListener('touchstart', (e) => {
+      e.preventDefault();
+      if (voiceLocked) { unlockVoice(); return; }
+      draggedOff = false;
+      startVoice(inputId);
+    });
+    btn.addEventListener('touchend', (e) => {
+      e.preventDefault();
+      if (voiceLocked) return;
+      stopVoice();
+    });
   }
+}
+
+function lockVoice(inputId) {
+  voiceLocked = true;
+  const micBtn = document.getElementById(micButtonMap[inputId]);
+  if (micBtn) {
+    micBtn.classList.add('voice-locked');
+    micBtn.title = 'Click to stop recording';
+  }
+  // Update placeholder to indicate locked/hands-free mode
+  const input = document.getElementById(inputId);
+  if (input) startVoiceDots(input, 'Listening (hands-free)', 'voice-listening');
+  // Show a stop button next to the input
+  if (input && !input.parentElement.querySelector('.voice-stop-btn')) {
+    const stopBtn = document.createElement('button');
+    stopBtn.className = 'btn btn-icon voice-stop-btn';
+    stopBtn.title = 'Stop recording';
+    stopBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+    stopBtn.addEventListener('click', (e) => { e.stopPropagation(); unlockVoice(); });
+    input.parentElement.insertBefore(stopBtn, input);
+  }
+}
+
+function unlockVoice() {
+  voiceLocked = false;
+  document.querySelectorAll('.voice-stop-btn').forEach(b => b.remove());
+  document.querySelectorAll('.btn-mic').forEach(b => b.classList.remove('voice-locked'));
+  stopVoice();
 }
 
 let voiceTargetInput = null;
@@ -2567,8 +2620,10 @@ async function startVoice(inputId) {
 function stopVoice() {
   if (!isRecording) return;
   isRecording = false;
+  voiceLocked = false;
 
-  document.querySelectorAll('.btn-mic').forEach((btn) => btn.classList.remove('recording'));
+  document.querySelectorAll('.btn-mic').forEach((btn) => btn.classList.remove('recording', 'voice-locked'));
+  document.querySelectorAll('.voice-stop-btn').forEach(b => b.remove());
   // Don't stopVoiceDots here — let onstop handle the transition to "Transcribing"
 
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
@@ -2652,14 +2707,17 @@ const GUIDE_SECTIONS = [
     id: 'what-atlas-is',
     title: 'What Atlas Is',
     content: `<p>Atlas is a strategic adviser that knows your goals, your situation, and your history. It gives specific, tactical advice — not generic motivation. Think of it as a senior consultant who remembers every conversation you've had and brings that full picture to bear on whatever you're facing.</p>
-<p>Atlas is not a chatbot. It doesn't just answer questions. It proactively challenges your thinking, tracks your commitments, notices when you're drifting from your goals, and tells you what it thinks you should do — even when you didn't ask.</p>`
+<p>Atlas is not a chatbot. It doesn't just answer questions. It proactively challenges your thinking, tracks your commitments, notices when you're drifting from your goals, and tells you what it thinks you should do — even when you didn't ask.</p>
+<p>Every morning, Atlas can generate a personalised brief that covers your top priorities, overdue commitments, risks across your goals, and a recommended focus for the day. It's like having a chief of staff who prepared your day before you sat down.</p>
+<p>Over time, Atlas builds a working model of how you operate — your decision-making tendencies, what kind of advice you actually act on, and where your blind spots are. This means the advice gets sharper and more personalised the more you use it.</p>`
   },
   {
     id: 'how-atlas-thinks',
     title: 'How Atlas Thinks',
-    content: `<p><strong>Before every session:</strong> Atlas loads your goals, your situation, recent session history, open actions, persistent insights, and any connected sources like email or calendar. It arrives at the conversation already briefed.</p>
-<p><strong>During the session:</strong> If the conversation goes somewhere unexpected, Atlas can search the web, recall past memory entries, or dig into your email for older context. It doesn't just work with what it started with.</p>
-<p><strong>After every session:</strong> Atlas processes the conversation — extracting decisions, commitments, insights, and patterns. Important items are stored in memory. Action items are tracked with due dates. This is why Atlas gets sharper over time — every session makes the next one better.</p>
+    content: `<p><strong>Before every session:</strong> Atlas loads your goals, your situation, recent session history, open actions, persistent insights, and any connected sources like email or calendar. It arrives at the conversation already briefed — you never have to re-explain where things stand.</p>
+<p><strong>During the session:</strong> If the conversation goes somewhere unexpected, Atlas can search the web for current information, recall past memory entries, or dig into your email for older context. It adapts in real time rather than being limited to what it started with.</p>
+<p><strong>After every session:</strong> Atlas processes the conversation — extracting decisions, commitments, insights, and patterns. Important items are stored in memory. Action items are tracked with due dates. Strategic decisions are logged with expected outcomes so Atlas can follow up later and check how they played out.</p>
+<p><strong>Between sessions:</strong> Atlas runs background analysis — detecting behavioural patterns across your sessions, spotting avoidance tendencies, and identifying what's working. This means Atlas can surface observations like "you consistently defer financial tasks to the end of the week" without you having to notice the pattern yourself.</p>
 <svg width="520" height="160" viewBox="0 0 520 160" fill="none" xmlns="http://www.w3.org/2000/svg">
   <rect x="10" y="50" width="110" height="44" rx="8" stroke="#6c8cff" stroke-width="1.5" fill="rgba(108,140,255,0.08)"/>
   <text x="65" y="76" text-anchor="middle" fill="#f0f2f5" font-size="12" font-family="Segoe UI, sans-serif">Load Context</text>
@@ -2687,13 +2745,16 @@ const GUIDE_SECTIONS = [
     id: 'goals',
     title: 'Goals',
     content: `<p>A goal is the organising unit of Atlas. Everything Atlas does is oriented around your active goals. When you create a goal, Atlas interviews you conversationally to understand what you're trying to achieve, why it matters, what constraints you have, and what usually gets in your way.</p>
-<p>Atlas protects your declared goals by default. If you start drifting toward distractions, Atlas will name it and challenge you — respectfully but directly. Goals can be paused, achieved, or revised when genuine evidence warrants it.</p>`
+<p>Atlas protects your declared goals by default. If you start drifting toward distractions, Atlas will name it and challenge you — respectfully but directly. Goals can be paused, achieved, or revised when genuine evidence warrants it.</p>
+<p>Each goal gets its own configuration — which data sources are relevant, which advisory perspectives should be active, and what priority level it holds. A job search goal might pull from email and calendar, while a fitness goal might only need your session history. Atlas manages this cross-goal awareness so advice on one goal doesn't accidentally undermine another.</p>
+<p>You can also revisit and update goals at any time. Atlas will interview you again about what's changed, keeping the original context intact so nothing is lost.</p>`
   },
   {
     id: 'actions',
     title: 'Actions and Follow-Up',
-    content: `<p>Actions are commitments that Atlas extracts from your conversations. When you agree to do something during a session — "I'll follow up with that recruiter tomorrow" — Atlas logs it as an action with a due date.</p>
+    content: `<p>Actions are commitments that Atlas extracts from your conversations. When you agree to do something during a session — "I'll follow up with that recruiter tomorrow" — Atlas logs it as an action with a due date. You don't need to manually create tasks — Atlas picks them up from natural conversation.</p>
 <p>Atlas follows up. If an action is overdue, Atlas will mention it at the start of your next session. If you've been followed up on three times with no progress, Atlas will diagnose the obstacle and recommend either doing it immediately or dropping it. This is accountability without guilt-tripping.</p>
+<p>Actions are linked to their parent goals, so Atlas can spot when one goal is getting all the attention while another is being neglected. The Actions screen gives you a clear view of everything you've committed to, what's on track, and what's slipping.</p>
 <svg width="560" height="80" viewBox="0 0 560 80" fill="none" xmlns="http://www.w3.org/2000/svg">
   <rect x="0" y="20" width="80" height="36" rx="6" stroke="#6c8cff" stroke-width="1.5" fill="rgba(108,140,255,0.08)"/>
   <text x="40" y="42" text-anchor="middle" fill="#f0f2f5" font-size="10" font-family="Segoe UI, sans-serif">Session Start</text>
@@ -2722,16 +2783,18 @@ const GUIDE_SECTIONS = [
     id: 'memory',
     title: 'Memory',
     content: `<p>Atlas has two kinds of memory. Your user files (Identity, Situation, Preferences) are stable context you maintain — they describe who you are, where you are in life, and how you want Atlas to work with you. These change rarely.</p>
-<p>Everything else — session summaries, extracted insights, patterns, decisions — is captured automatically by Atlas after each session. High-importance items persist indefinitely. Routine items stay in a 7-day window and fade. You can browse all of it on the Memory screen.</p>`
+<p>Everything else — session summaries, extracted insights, patterns, decisions — is captured automatically by Atlas after each session. High-importance items persist indefinitely. Routine items stay in a 7-day window and fade. You can browse all of it on the Memory screen.</p>
+<p>Atlas also tracks strategic decisions separately — recording what you decided, what alternatives were considered, and what outcome you expected. It follows up on these decisions later to check whether they played out as planned, helping you learn from your own decision-making over time.</p>
+<p>When you override Atlas's recommendation and go a different direction, that's recorded too. These overrides help Atlas calibrate — learning when to push harder and when to defer to your judgment.</p>`
   },
   {
     id: 'sources',
     title: 'Sources — Email, Calendar, Files',
-    content: `<p>Sources are data feeds that Atlas can draw from to give better advice. Not every source is relevant to every goal.</p>
-<p><strong>Email:</strong> Atlas scans your recent inbox, ranks emails by relevance to your active goals, and deeply reads the most important ones. It summarises what it found — it doesn't dump raw emails into its thinking. You control which goals use email through source settings.</p>
-<p><strong>Calendar:</strong> Atlas reads your upcoming events so it can factor your schedule into advice. "You have an interview at 2pm, so front-load applications this morning."</p>
-<p><strong>Files:</strong> You can upload documents — CVs, job descriptions, bank statements, recipes, health records — and link them to specific goals. Atlas reads the content and references it in sessions.</p>
-<p>Not every goal needs every source. A health goal probably doesn't need email. A job search goal probably doesn't need recipes. Atlas manages this through per-goal source settings.</p>`
+    content: `<p>Sources are data feeds that Atlas can draw from to give better advice. Not every source is relevant to every goal, and Atlas lets you configure this per goal.</p>
+<p><strong>Email:</strong> Atlas scans your recent inbox, ranks emails by relevance to your active goals, and deeply reads the most important ones. It even expands email threads to understand full conversations — so if a recruiter replied to your application, Atlas reads the whole exchange, not just the latest message. It summarises what it found rather than dumping raw emails into its thinking.</p>
+<p><strong>Calendar:</strong> Atlas reads your upcoming events so it can factor your schedule into advice. "You have an interview at 2pm, so front-load applications this morning." It refreshes this data at the start of every session so the schedule is always current.</p>
+<p><strong>Files:</strong> You can upload documents — CVs, job descriptions, bank statements, recipes, health records — and link them to specific goals. Atlas reads the content and references it naturally in sessions. If you upload a job description, Atlas can compare it against your CV and suggest how to tailor your application.</p>
+<p>Not every goal needs every source. A health goal probably doesn't need email. A job search goal probably doesn't need recipes. You control which sources feed into which goals through the goal settings screen.</p>`
   },
   {
     id: 'perspectives',
@@ -2766,22 +2829,24 @@ const GUIDE_SECTIONS = [
     id: 'methodology',
     title: 'The Methodology',
     content: `<p>Atlas doesn't make up its advisory approach. It follows a research-backed methodology covering goal formation, decision-making frameworks, drift detection, accountability structures, and follow-up techniques. This methodology is based on published research in goal-setting theory, behavioural psychology, and executive advisory practice.</p>
-<p>You can read the full methodology in Settings. It governs how Atlas interviews you about goals, how it challenges drift, how it scores what to remember, and how it classifies actions.</p>`
+<p>This means Atlas doesn't just give you opinions — its approach to challenging drift, structuring decisions, and escalating accountability follows tested frameworks. When Atlas pushes back on a commitment you've been avoiding, it's following a defined escalation process, not being randomly aggressive.</p>
+<p>You can read the full methodology in Settings. It governs how Atlas interviews you about goals, how it challenges drift, how it scores what to remember, and how it classifies actions. It's fully transparent — nothing is hidden about how Atlas forms its advice.</p>`
   },
   {
     id: 'user-files',
     title: 'Your User Files',
     content: `<p>Three files describe you to Atlas:</p>
 <p><strong>Identity</strong> — Stable facts: your name, location, background, communication style. Changes rarely. Think of it as your professional bio for Atlas.</p>
-<p><strong>Situation</strong> — Current reality: employment, finances, living situation, major life factors. Update this when your circumstances change.</p>
-<p><strong>Preferences</strong> — How you want Atlas to work: directness level, working hours, protected time blocks, brief detail level. Set once, adjust as needed.</p>
-<p>You can edit these directly or talk to Atlas about them — click "Talk to Atlas about this" and have a conversation. Atlas proposes updates and you approve.</p>`
+<p><strong>Situation</strong> — Current reality: employment, finances, living situation, major life factors. Update this when your circumstances change so Atlas's advice stays grounded in where you actually are.</p>
+<p><strong>Preferences</strong> — How you want Atlas to work: directness level, working hours, protected time blocks, brief detail level. Want Atlas to be blunt? Say so. Prefer it to ask before pushing back? Set that here.</p>
+<p>You can edit these directly or talk to Atlas about them — click "Talk to Atlas about this" and have a conversation. Atlas will ask you questions, draft updates based on your answers, and let you review everything before saving. Nothing changes without your approval.</p>`
   },
   {
     id: 'privacy',
     title: 'Privacy and Data',
-    content: `<p>Atlas runs locally as a desktop app. Your conversations are processed through the currently selected AI engine, which Atlas runs through the local CLI integration. Session data, goals, actions, and memory are stored in your Supabase database. Email and calendar data is fetched directly from your Google account using credentials stored locally — Atlas does not send your email data to third parties.</p>
-<p>Perspective files, user context files, and the methodology are stored as local files on your computer.</p>`
+    content: `<p>Atlas runs locally as a desktop app on your machine. Your conversations are processed through the currently selected AI engine via its local CLI — there is no Atlas server sitting between you and the model. Session data, goals, actions, and memory are stored in your own Supabase database instance.</p>
+<p>Email and calendar data is fetched directly from your Google account using credentials stored locally on your computer. Atlas does not send your email or calendar data to third parties — it reads your data, summarises it locally, and includes only compressed summaries in its context.</p>
+<p>Perspective files, user context files, and the methodology are stored as local files on your computer. You own all of your data and can inspect, export, or delete it at any time.</p>`
   },
   {
     id: 'faq',
@@ -2814,6 +2879,14 @@ const FAQ_ITEMS = [
   {
     q: 'Can I trust the advice?',
     a: "Atlas is direct about what it knows versus what it's inferring. When it states facts, it grounds them in your data. When it's guessing, it says so. Its methodology is research-backed and visible. But ultimately, Atlas advises — you decide. It will never override your judgment on decisions that depend on your values."
+  },
+  {
+    q: 'What is the morning brief?',
+    a: "It's a personalised daily briefing that Atlas generates based on your goals, open actions, overdue items, recent sessions, and connected sources. It covers your top priorities for the day, flags risks, and gives you a clear recommendation on where to focus. Think of it as a daily stand-up with your adviser."
+  },
+  {
+    q: 'Does Atlas get better over time?',
+    a: "Yes. Every session adds to Atlas's memory — decisions you've made, patterns it's spotted, what kind of advice you act on versus resist. It periodically builds a working model of how you operate, which makes future advice more targeted. The more sessions you have, the more context Atlas brings."
   },
   {
     q: 'Do I need to read this whole guide?',
@@ -2945,11 +3018,17 @@ async function init() {
   try {
     cachedCalendarData = await atlas.calendar.fetch();
     renderCalendarPanel();
-  } catch {}
+  } catch (err) {
+    console.error('[Init] Calendar fetch failed:', err.message);
+    showToast('Calendar sync failed — Atlas may not have current schedule data', 'warning', 6000);
+  }
 
   try {
     cachedEmailData = await atlas.email.fetch();
-  } catch {}
+  } catch (err) {
+    console.error('[Init] Email fetch failed:', err.message);
+    showToast('Email sync failed — Atlas may not have current email context', 'warning', 6000);
+  }
 
   await loadToday();
 }

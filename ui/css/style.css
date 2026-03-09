@@ -933,6 +933,34 @@ select.form-select {
   50% { box-shadow: 0 0 0 8px rgba(248,113,113,0); }
 }
 
+.btn-mic.voice-locked {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+  animation: micPulse 1s ease infinite;
+  border-radius: 50%;
+}
+
+.voice-stop-btn {
+  background: var(--danger);
+  border: none;
+  color: #fff;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  padding: 0;
+  margin-right: 6px;
+  animation: micPulse 1s ease infinite;
+}
+.voice-stop-btn:hover {
+  background: #dc2626;
+}
+
 /* === Voice status animation === */
 
 .chat-input.voice-listening {
