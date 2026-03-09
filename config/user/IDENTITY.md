@@ -1,6 +1,6 @@
 # Identity
 
-- **Name:** [User's name]
+- **Name:** Charles
 - **Location:** Glasgow, Scotland
-- **Background:** [To be filled in during first session]
+- **Background:** Front End Developer
 - **Communication style:** Direct, no fluff

@@ -553,27 +553,39 @@ select.form-select {
 
 /* === Typing indicator === */
 
-.typing-indicator {
+.typing-indicator .typing-dots {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 4px 0;
+  gap: 5px;
 }
 
-.typing-indicator span {
+.typing-indicator .typing-dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--text-muted);
-  animation: typingPulse 1.4s ease-in-out infinite;
+  background: var(--accent);
+  animation: dotGlow 1.4s ease-in-out infinite;
 }
 
-.typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
-.typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
+.typing-indicator .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+.typing-indicator .typing-dot:nth-child(3) { animation-delay: 0.4s; }
 
-@keyframes typingPulse {
-  0%, 60%, 100% { opacity: 0.3; transform: scale(0.8); }
-  30% { opacity: 1; transform: scale(1); }
+@keyframes dotGlow {
+  0%, 100% { opacity: 0.2; box-shadow: 0 0 0 0 transparent; }
+  50% { opacity: 1; box-shadow: 0 0 6px 1px var(--accent); }
+}
+
+.typing-indicator .typing-status {
+  margin-left: 10px;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--text-muted);
+  animation: fadeIn 0.3s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 /* === Message timestamps === */
@@ -645,6 +657,44 @@ select.form-select {
 
 .brief-content strong, .md-content strong { color: var(--text); font-weight: 600; }
 .brief-content em, .md-content em { color: var(--text-secondary); }
+
+/* Markdown tables */
+.md-table-wrap {
+  overflow-x: auto;
+  margin: 12px 0;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+}
+
+.md-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.md-table th {
+  background: var(--bg-elevated);
+  color: var(--text);
+  font-weight: 600;
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.md-table td {
+  color: var(--text-secondary);
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.md-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.md-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
 
 /* Brief section emphasis */
 .brief-content h2:first-of-type,

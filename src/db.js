@@ -213,11 +213,11 @@ async function cleanupEmptySessions(days = 30) {
   cutoff.setDate(cutoff.getDate() - days);
   const cutoffStr = cutoff.toISOString().split('T')[0];
 
+  // Delete old sessions past the cutoff date
   const { data, error } = await db
     .from('sessions')
     .delete()
     .lt('date', cutoffStr)
-    .or('summary.is.null,summary.eq.')
     .select('id');
 
   if (error) throw error;
@@ -233,6 +233,53 @@ async function cleanupOldSessions(days = 30) {
 async function saveEntry(entry) {
   const db = getClient();
   const { data, error } = await db.from('entries').insert(entry).select().single();
+  if (error) throw error;
+  return data;
+}
+
+async function updateEntry(id, updates) {
+  const db = getClient();
+  const { error } = await db.from('entries').update(updates).eq('id', id);
+  if (error) throw error;
+}
+
+async function getDailyDigests(days = 7) {
+  const db = getClient();
+  const since = new Date();
+  since.setDate(since.getDate() - days);
+
+  const { data, error } = await db
+    .from('entries')
+    .select('*')
+    .eq('entry_type', 'daily_digest')
+    .gte('date', since.toISOString().split('T')[0])
+    .order('date', { ascending: false });
+
+  if (error) throw error;
+  return data;
+}
+
+async function getDailyDigest(date) {
+  const db = getClient();
+  const { data, error } = await db
+    .from('entries')
+    .select('*')
+    .eq('entry_type', 'daily_digest')
+    .eq('date', date)
+    .limit(1);
+
+  if (error) throw error;
+  return data && data.length > 0 ? data[0] : null;
+}
+
+async function getSessionsByDate(date) {
+  const db = getClient();
+  const { data, error } = await db
+    .from('sessions')
+    .select('*')
+    .eq('date', date)
+    .order('created_at', { ascending: true });
+
   if (error) throw error;
   return data;
 }
@@ -577,7 +624,7 @@ module.exports = {
   initDB, getClient,
   saveGoal, getActiveGoals, getGoal, updateGoalStatus, getAllGoals, archiveGoal, unarchiveGoal, getArchivedGoals, countGoalLinkedItems, deleteGoalCascade,
   createSession, updateSession, getRecentSessions, cleanupEmptySessions, cleanupOldSessions, deleteSession, deleteAllSessions,
-  saveEntry, getRecentEntries, getPersistentEntries, cleanupOldEntries, getEntriesByGoal, getEntriesByType,
+  saveEntry, updateEntry, getRecentEntries, getPersistentEntries, cleanupOldEntries, getEntriesByGoal, getEntriesByType, getDailyDigests, getDailyDigest, getSessionsByDate,
   saveAction, getOpenActions, updateAction, getOverdueActions, getCompletedActions, getAllActions,
   getEntriesBySession,
   saveOverride, getUnresolvedOverrides, updateOverride, getAllOverrides,

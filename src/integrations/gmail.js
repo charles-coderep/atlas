@@ -120,30 +120,42 @@ const LOW_VALUE_PATTERNS = [
   /notification@/i, /notifications@/i, /digest@/i,
 ];
 
-const JOB_KEYWORDS = [
-  'interview', 'offer', 'application', 'assessment', 'follow-up',
-  'recruiter', 'role', 'position', 'salary', 'contract',
-  'shortlisted', 'screening', 'hiring', 'onboarding', 'vacancy',
+const STATUS_CHANGE_KEYWORDS = [
+  'cancel', 'cancelled', 'canceled', 'withdrawn', 'declined',
+  'rescheduled', 'postponed', 'rejected', 'accepted', 'confirmed',
+  'updated', 'changed',
 ];
 
 function rankEmails(candidates, goals, openActions, recentEntries) {
-  // Extract keywords from goals, actions, and entries for matching
+  // Extract keywords dynamically from the user's actual goals
   const goalKeywords = new Set();
   for (const g of goals) {
     const data = g.goal_data || {};
-    const text = [g.title, data.outcome, data.target_role, data.target_company, data.description]
-      .filter(Boolean).join(' ').toLowerCase();
-    for (const word of text.split(/\s+/)) {
+    const text = Object.values(data).filter(v => typeof v === 'string').join(' ');
+    const combined = [g.title, g.type, text].filter(Boolean).join(' ').toLowerCase();
+    for (const word of combined.split(/\s+/)) {
       if (word.length > 3) goalKeywords.add(word);
     }
   }
 
+  // Extract keywords from open actions
   const actionKeywords = new Set();
   for (const a of openActions || []) {
     for (const word of a.description.toLowerCase().split(/\s+/)) {
       if (word.length > 3) actionKeywords.add(word);
     }
   }
+
+  // Extract keywords from recent entries for broader context
+  const entryKeywords = new Set();
+  for (const e of (recentEntries || []).slice(0, 20)) {
+    for (const word of (e.content || '').toLowerCase().split(/\s+/)) {
+      if (word.length > 4) entryKeywords.add(word);
+    }
+  }
+
+  // If goal-derived context is thin, lean harder on recency/unread
+  const hasRichContext = goalKeywords.size + actionKeywords.size >= 5;
 
   // Count threads to detect active conversations
   const threadCounts = {};
@@ -158,32 +170,44 @@ function rankEmails(candidates, goals, openActions, recentEntries) {
     const snippetLower = candidate.snippet.toLowerCase();
     const combinedText = `${fromLower} ${subjectLower} ${snippetLower}`;
 
-    // Job-related keywords in subject or snippet
-    for (const kw of JOB_KEYWORDS) {
-      if (subjectLower.includes(kw)) score += 3;
-      else if (snippetLower.includes(kw)) score += 1;
-    }
-
-    // Goal keyword matches
+    // Goal keyword matches — primary scoring mechanism
+    let goalHits = 0;
     for (const kw of goalKeywords) {
-      if (combinedText.includes(kw)) { score += 2; break; }
+      if (subjectLower.includes(kw)) { goalHits++; score += 3; }
+      else if (snippetLower.includes(kw)) { goalHits++; score += 1; }
     }
+    // Bonus for multiple goal keyword hits (strong relevance signal)
+    if (goalHits >= 2) score += 2;
 
     // Action keyword matches
     for (const kw of actionKeywords) {
-      if (combinedText.includes(kw)) { score += 2; break; }
+      if (subjectLower.includes(kw)) { score += 3; break; }
+      else if (combinedText.includes(kw)) { score += 1; break; }
+    }
+
+    // Entry keyword matches (lighter weight — broader context)
+    for (const kw of entryKeywords) {
+      if (subjectLower.includes(kw)) { score += 1; break; }
+    }
+
+    // Status-change keywords — always urgent regardless of goal type
+    for (const kw of STATUS_CHANGE_KEYWORDS) {
+      if (subjectLower.includes(kw)) score += 5;
+      else if (snippetLower.includes(kw)) score += 2;
     }
 
     // Active thread (multiple messages = conversation)
     if (threadCounts[candidate.threadId] > 1) score += 3;
 
-    // Unread bonus
-    if (candidate.isUnread) score += 1;
+    // Unread bonus — stronger when goal context is thin
+    if (candidate.isUnread) score += hasRichContext ? 1 : 3;
 
-    // Recency bonus (last 24h)
+    // Recency bonus — stronger when goal context is thin
     try {
       const emailDate = new Date(candidate.date);
-      if (Date.now() - emailDate.getTime() < 24 * 60 * 60 * 1000) score += 1;
+      const hoursAgo = (Date.now() - emailDate.getTime()) / (60 * 60 * 1000);
+      if (hoursAgo < 6) score += hasRichContext ? 2 : 4;
+      else if (hoursAgo < 24) score += hasRichContext ? 1 : 2;
     } catch {}
 
     // Low-value penalty
@@ -470,8 +494,8 @@ async function fetchEmailContext(goals, openActions, recentEntries) {
 
     // Layer 2: Goal-aware ranking
     const ranked = rankEmails(candidates, goals, openActions, recentEntries);
-    const topCandidates = ranked.filter((c) => c.score > 0);
-    console.log(`  [Gmail: ${topCandidates.length} goal-relevant]`);
+    const topCandidates = ranked.filter((c) => c.score >= 0).slice(0, MAX_DEEP_READ);
+    console.log(`  [Gmail: ${topCandidates.length} top candidates (${ranked.filter(c => c.score > 0).length} scored positively)]`);
 
     // Layer 3: Selective deep read
     const { deepRead, expandedThreads } = await deepReadEmails(topCandidates, gmail);

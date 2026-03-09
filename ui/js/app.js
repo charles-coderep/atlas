@@ -32,6 +32,23 @@ function showToast(message, type = 'info', duration = 4000) {
 function renderMarkdown(text) {
   if (!text) return '';
   let html = escapeHtml(text);
+  // Tables — parse before other block transforms
+  html = html.replace(/((?:^\|.+\|$\n?)+)/gm, (tableBlock) => {
+    const rows = tableBlock.trim().split('\n').filter(r => r.trim());
+    if (rows.length < 2) return tableBlock;
+    const parseRow = (row) => row.replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+    // Check for separator row (second row must be all dashes/colons)
+    const sepCells = parseRow(rows[1]);
+    const isSeparator = sepCells.every(c => /^[:\-][\-]+[:\-]?$/.test(c));
+    if (!isSeparator) return tableBlock;
+    const headers = parseRow(rows[0]);
+    const headerHtml = '<tr>' + headers.map(h => `<th>${h}</th>`).join('') + '</tr>';
+    const bodyRows = rows.slice(2).map(row => {
+      const cells = parseRow(row);
+      return '<tr>' + cells.map(c => `<td>${c}</td>`).join('') + '</tr>';
+    }).join('');
+    return `<div class="md-table-wrap"><table class="md-table"><thead>${headerHtml}</thead><tbody>${bodyRows}</tbody></table></div>`;
+  });
   // Headers (## → h2, ### → h3, # → h1)
   html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
   html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
@@ -61,6 +78,11 @@ function renderMarkdown(text) {
   html = html.replace(/<\/(h[123]|ul|ol|li)><br>/g, '</$1>');
   html = html.replace(/<p><\/p>/g, '');
   html = html.replace(/<p><br>/g, '<p>');
+  // Clean up around tables
+  html = html.replace(/<p><div class="md-table-wrap">/g, '<div class="md-table-wrap">');
+  html = html.replace(/<\/div><\/p>/g, '</div>');
+  html = html.replace(/<br><div class="md-table-wrap">/g, '<div class="md-table-wrap">');
+  html = html.replace(/<\/div><br>/g, '</div>');
   return html;
 }
 
@@ -325,8 +347,9 @@ document.getElementById('btn-chat-start').addEventListener('click', async () => 
   messages.innerHTML = '';
   lastChatRole = null;
   typingEl = showTypingIndicator('chat-messages');
+  typingEl.setStatus('Loading context...');
   thinkingNoteTimer = window.setTimeout(() => {
-    appendChatMessage('chat-messages', 'system', 'Atlas is thinking - this can take a moment on first load.');
+    typingEl.setStatus('Still working — first load takes longer...');
   }, 10000);
 
   try {
@@ -352,6 +375,13 @@ document.getElementById('btn-chat-start').addEventListener('click', async () => 
     document.getElementById('chat-input-bar').style.display = 'flex';
     clearTimeout(thinkingNoteTimer);
     removeTypingIndicator(typingEl);
+
+    if (result.emailFetchFailed) {
+      showToast('Email fetch failed — Atlas may not have current email context', 'warning');
+    }
+    if (result.calendarFetchFailed) {
+      showToast('Calendar fetch failed — Atlas may not have today\'s schedule', 'warning');
+    }
 
     if (result.opening) {
       appendChatMessage('chat-messages', 'atlas', result.opening);
@@ -553,32 +583,40 @@ function showTypingIndicator(containerId) {
   div.className = 'chat-message atlas typing-indicator';
   div.innerHTML = `
     <div class="msg-role">Atlas</div>
-    <div class="msg-content"><span class="typing-dots">
-      <span>.</span><span>.</span><span>.</span>
-    </span><span class="typing-elapsed" style="display:none;margin-left:8px;font-size:12px;color:var(--text-muted)"></span></div>
+    <div class="msg-content">
+      <span class="typing-dots"><span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span></span>
+      <span class="typing-status"></span>
+    </div>
   `;
   messages.appendChild(div);
   messages.scrollTop = messages.scrollHeight;
 
-  // Show elapsed time after 5 seconds
-  const startTime = Date.now();
-  div._elapsedInterval = setInterval(() => {
-    const elapsed = Math.round((Date.now() - startTime) / 1000);
-    if (elapsed >= 5) {
-      const elapsedEl = div.querySelector('.typing-elapsed');
-      if (elapsedEl) {
-        elapsedEl.style.display = '';
-        elapsedEl.textContent = `${elapsed}s`;
-      }
-    }
-  }, 1000);
+  // Cycle through status messages while thinking
+  const statusEl = div.querySelector('.typing-status');
+  const statusMessages = ['Thinking...', 'Reviewing context...', 'Composing response...'];
+  let statusIndex = 0;
+
+  // Show first status after a short delay
+  div._statusTimeout = setTimeout(() => {
+    if (statusEl) statusEl.textContent = statusMessages[0];
+    div._statusInterval = setInterval(() => {
+      statusIndex = (statusIndex + 1) % statusMessages.length;
+      if (statusEl) statusEl.textContent = statusMessages[statusIndex];
+    }, 4000);
+  }, 2000);
+
+  // Allow external status updates (e.g. from processing callbacks)
+  div.setStatus = (text) => {
+    if (statusEl) statusEl.textContent = text;
+  };
 
   return div;
 }
 
 function removeTypingIndicator(el) {
   if (el) {
-    if (el._elapsedInterval) clearInterval(el._elapsedInterval);
+    if (el._statusTimeout) clearTimeout(el._statusTimeout);
+    if (el._statusInterval) clearInterval(el._statusInterval);
     el.remove();
   }
 }
@@ -1873,17 +1911,6 @@ function renderEmailData(data) {
       <div class="card-body">
         <div><strong>From:</strong> ${escapeHtml(s.from)}</div>
         <div><strong>Date:</strong> ${s.date}</div>
-        ${s.threadExpanded && s.threadMessages ? `
-          <div style="margin-top:8px"><strong>Thread (${s.threadMessages.length} messages):</strong></div>
-          ${s.threadMessages.map((m) => `
-            <div style="margin:4px 0;padding:8px;background:var(--bg);border-radius:4px;font-size:12px">
-              <div style="color:var(--text-secondary)">${escapeHtml(m.from)} — ${m.date}</div>
-              <div style="margin-top:4px;white-space:pre-wrap">${escapeHtml(m.body.substring(0, 300))}</div>
-            </div>
-          `).join('')}
-        ` : `
-          <div style="margin-top:8px;white-space:pre-wrap;font-size:13px">${escapeHtml((s.body || '').substring(0, 500))}</div>
-        `}
       </div>
     </div>
   `).join('');
@@ -3180,6 +3207,7 @@ document.getElementById('btn-decision-mode').addEventListener('click', async () 
   messages.innerHTML = '';
   lastChatRole = null;
   typingEl = showTypingIndicator('chat-messages');
+  typingEl.setStatus('Preparing decision rehearsal...');
 
   try {
     const options = { mode: 'decision' };
@@ -3202,6 +3230,13 @@ document.getElementById('btn-decision-mode').addEventListener('click', async () 
     btn.style.display = 'none';
     document.getElementById('btn-chat-end').style.display = 'inline-flex';
     document.getElementById('chat-input-bar').style.display = 'flex';
+
+    if (result.emailFetchFailed) {
+      showToast('Email fetch failed — Atlas may not have current email context', 'warning');
+    }
+    if (result.calendarFetchFailed) {
+      showToast('Calendar fetch failed — Atlas may not have today\'s schedule', 'warning');
+    }
 
     if (result.opening) {
       appendChatMessage('chat-messages', 'atlas', result.opening);

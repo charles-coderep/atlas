@@ -1,4 +1,4 @@
-const { updateSession, saveEntry, saveAction, saveOverride, getOpenActions, getActiveGoals, getCompletedActions, getRecentSessions, getPersistentEntries, saveDecision, getLatestUserModel, clearPreviousUserModels } = require('./db');
+const { updateSession, saveEntry, updateEntry, saveAction, saveOverride, getOpenActions, getActiveGoals, getCompletedActions, getRecentSessions, getRecentEntries, getPersistentEntries, saveDecision, getLatestUserModel, clearPreviousUserModels, getDailyDigest, getSessionsByDate } = require('./db');
 const { callEngine } = require('./orchestrator');
 
 const EXTRACTION_RUBRIC = `Rules for extraction:
@@ -8,8 +8,8 @@ const EXTRACTION_RUBRIC = `Rules for extraction:
 - Only extract items worth remembering — not every sentence is an entry.`;
 
 async function processSession(sessionId, conversationHistory, durationMinutes, onProgress) {
-  if (conversationHistory.length < 4) {
-    // Fewer than 2 exchanges (user + atlas = 2 messages per exchange)
+  if (conversationHistory.length < 2) {
+    // Need at least one exchange to be worth processing
     await updateSession(sessionId, { duration_minutes: durationMinutes });
     return { entries: 0, actions: 0 };
   }
@@ -49,6 +49,12 @@ async function processSession(sessionId, conversationHistory, durationMinutes, o
     overrides = rawEntries.filter((entry) => entry.entry_type === 'override');
   } else {
     ({ entries, actions, overrides } = await deduplicateExtractions(rawEntries, rawActions));
+  }
+
+  // Cross-session dedup: remove new entries already covered by recent database entries
+  if (entries.length > 0) {
+    if (onProgress) onProgress('Checking for cross-session duplicates...');
+    entries = await deduplicateAgainstExisting(entries);
   }
 
   // Check for duplicate actions against existing open actions
@@ -127,7 +133,106 @@ async function processSession(sessionId, conversationHistory, durationMinutes, o
     }
   }
 
+  // Generate or update daily digest (runs after all saves complete)
+  if (summary && summary !== 'Summary generation failed.') {
+    try {
+      if (onProgress) onProgress('Updating daily digest...');
+      await updateDailyDigest(summary);
+    } catch (err) {
+      console.error('[Processor] Daily digest update failed:', err.message);
+    }
+  }
+
   return { entries: entryCount, actions: actionCount, decisions: decisionCount };
+}
+
+async function updateDailyDigest(latestSessionSummary) {
+  const today = new Date().toISOString().split('T')[0];
+  const existingDigest = await getDailyDigest(today);
+
+  if (existingDigest) {
+    // Merge new session into existing digest
+    const prompt = `Here is today's existing daily digest and the summary from the latest session. Merge them into one updated digest.
+
+EXISTING DIGEST:
+${existingDigest.content}
+
+NEW SESSION SUMMARY:
+${latestSessionSummary}
+
+Rules:
+- If the new session contains information already covered in the digest, do not add it again.
+- If the new session adds a meaningful new detail to something already mentioned, update that section with the new detail.
+- If the new session introduces an entirely new topic, append it.
+- If the new session contradicts something in the existing digest (for example, a plan changed or something was canceled), replace the old information with the new.
+- The digest should read as one coherent summary of the day, not as a list of sessions.
+- Keep it under 250 words.
+
+Output ONLY the updated digest text, nothing else.`;
+
+    try {
+      const updated = await callEngine(prompt, 'You merge session summaries into a concise daily digest. Output only the digest text.');
+      if (updated && updated.length > 20) {
+        await updateEntry(existingDigest.id, { content: updated });
+        console.log('[Processor] Daily digest updated for', today);
+      }
+    } catch (err) {
+      console.error('[Processor] Digest merge failed:', err.message);
+    }
+  } else {
+    // First session of the day — gather all today's sessions and create digest
+    const todaySessions = await getSessionsByDate(today);
+    const summaries = todaySessions.filter(s => s.summary).map(s => s.summary);
+
+    // If this is the only session, use the summary directly without an AI call
+    if (summaries.length <= 1) {
+      await saveEntry({
+        session_id: null,
+        goal_id: null,
+        domain: 'meta',
+        entry_type: 'daily_digest',
+        content: latestSessionSummary,
+        importance: 4,
+        is_persistent: true,
+        source: 'system',
+        date: today,
+        tags: ['daily-digest'],
+      });
+      console.log('[Processor] Daily digest created for', today);
+      return;
+    }
+
+    // Multiple sessions already exist — consolidate
+    const prompt = `Produce a single consolidated summary of everything discussed, decided, and committed to today across these advisory sessions.
+
+TODAY'S SESSION SUMMARIES:
+${summaries.map((s, i) => `Session ${i + 1}: ${s}`).join('\n\n')}
+
+Write one coherent summary covering the full day. Not a list of sessions — a unified summary. Keep it under 250 words.
+
+Output ONLY the digest text, nothing else.`;
+
+    try {
+      const digest = await callEngine(prompt, 'You consolidate multiple session summaries into one daily digest. Output only the digest text.');
+      if (digest && digest.length > 20) {
+        await saveEntry({
+          session_id: null,
+          goal_id: null,
+          domain: 'meta',
+          entry_type: 'daily_digest',
+          content: digest,
+          importance: 4,
+          is_persistent: true,
+          source: 'system',
+          date: today,
+          tags: ['daily-digest'],
+        });
+        console.log('[Processor] Daily digest created for', today);
+      }
+    } catch (err) {
+      console.error('[Processor] Digest creation failed:', err.message);
+    }
+  }
 }
 
 async function extractSummaryAndEntries(transcript, goalIds) {
@@ -311,6 +416,48 @@ async function filterDuplicateActions(newActions, existingActions) {
   });
 }
 
+async function deduplicateAgainstExisting(newEntries) {
+  if (newEntries.length === 0) return newEntries;
+
+  const existingEntries = await getRecentEntries(7);
+  if (existingEntries.length === 0) return newEntries;
+
+  const prompt = `Here are entries already in the database from previous sessions, and here are new entries about to be saved from the latest session.
+
+EXISTING DATABASE ENTRIES:
+${JSON.stringify(existingEntries.map(e => ({ content: e.content, entry_type: e.entry_type, date: e.date })), null, 2)}
+
+NEW ENTRIES TO SAVE:
+${JSON.stringify(newEntries.map((e, i) => ({ index: i, content: e.content, entry_type: e.entry_type })), null, 2)}
+
+Remove any new entry that duplicates information already stored. Rules:
+- If a new entry is essentially the same information as an existing entry restated in different words, remove it.
+- If a new entry adds a meaningful update or new detail to an existing fact, KEEP the new entry.
+- If a new entry covers an entirely new topic not in the existing entries, KEEP it.
+- When in doubt, keep the new entry.
+
+Return ONLY a JSON array of the index numbers of new entries that SHOULD BE SAVED. For example: [0, 2, 3] means keep entries at index 0, 2, and 3, and discard the rest.`;
+
+  try {
+    const result = await callEngine(prompt, 'You identify duplicate entries. Output only a valid JSON array of index numbers.');
+    const match = result.match(/\[[\s\S]*?\]/);
+    if (!match) return newEntries;
+
+    const keepIndices = JSON.parse(match[0]);
+    if (!Array.isArray(keepIndices)) return newEntries;
+
+    const filtered = newEntries.filter((_, i) => keepIndices.includes(i));
+    const removed = newEntries.length - filtered.length;
+    if (removed > 0) {
+      console.log(`[Processor] Cross-session dedup: removed ${removed} duplicate entries`);
+    }
+    return filtered;
+  } catch (err) {
+    console.error('[Processor] Cross-session dedup failed:', err.message);
+    return newEntries;
+  }
+}
+
 async function generateUserModel(recentSessions, persistentEntries, existingModel) {
   const sessionContext = recentSessions
     .filter(s => s.summary)
@@ -461,4 +608,68 @@ async function runPatternDetection() {
   }
 }
 
-module.exports = { processSession, generateUserModel, runUserModelGeneration, detectPatterns, runPatternDetection };
+async function runStalenessCheck() {
+  try {
+    const persistentEntries = await getPersistentEntries();
+    if (persistentEntries.length === 0) return { checked: 0, demoted: 0 };
+
+    const recentSessions = await getRecentSessions(7);
+    const summaries = recentSessions
+      .filter(s => s.summary)
+      .slice(0, 5)
+      .map(s => `[${s.date}] ${s.summary}`);
+
+    if (summaries.length === 0) return { checked: persistentEntries.length, demoted: 0 };
+
+    const prompt = `You are reviewing persistent memory entries for staleness. These entries are stored long-term and loaded into every session. Some may no longer be accurate based on recent activity.
+
+PERSISTENT ENTRIES:
+${JSON.stringify(persistentEntries.map(e => ({ id: e.id, content: e.content, entry_type: e.entry_type, date: e.date })), null, 2)}
+
+RECENT SESSION SUMMARIES:
+${summaries.join('\n\n')}
+
+Are any of these persistent entries no longer accurate based on recent evidence? Examples of staleness:
+- A behavioural pattern that has been resolved (e.g. "tends to avoid networking" but recent sessions show active networking)
+- A constraint that no longer applies (e.g. "limited by budget" but finances have improved)
+- A situation that has changed (e.g. "interviewing at Company X" but that process ended)
+- A goal-related fact that is outdated (e.g. "targeting £60k salary" but target was revised)
+
+Only flag entries where recent sessions provide clear evidence the entry is outdated. Do not flag entries just because they are old — age alone is not staleness. Do not flag entries that are still plausibly true.
+
+Return ONLY a JSON array of entry IDs to demote. If none are stale, return an empty array [].`;
+
+    const result = await callEngine(prompt, 'You identify stale persistent memory entries. Output only a valid JSON array of entry IDs.');
+    const match = result.match(/\[[\s\S]*?\]/);
+    if (!match) return { checked: persistentEntries.length, demoted: 0 };
+
+    const idsToDemote = JSON.parse(match[0]);
+    if (!Array.isArray(idsToDemote) || idsToDemote.length === 0) {
+      return { checked: persistentEntries.length, demoted: 0 };
+    }
+
+    // Validate IDs against actual persistent entries
+    const validIds = new Set(persistentEntries.map(e => e.id));
+    let demoted = 0;
+    for (const id of idsToDemote) {
+      if (!validIds.has(id)) continue;
+      try {
+        await updateEntry(id, { importance: 1, is_persistent: false });
+        demoted++;
+      } catch (err) {
+        console.error(`[Staleness] Failed to demote entry ${id}:`, err.message);
+      }
+    }
+
+    if (demoted > 0) {
+      console.log(`[Staleness] Demoted ${demoted} stale persistent entries`);
+    }
+
+    return { checked: persistentEntries.length, demoted };
+  } catch (err) {
+    console.error('[Staleness] Check failed:', err.message);
+    return { checked: 0, demoted: 0 };
+  }
+}
+
+module.exports = { processSession, generateUserModel, runUserModelGeneration, detectPatterns, runPatternDetection, runStalenessCheck };

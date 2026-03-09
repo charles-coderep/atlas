@@ -7,6 +7,7 @@ const {
   getPersistentEntries,
   getRecentEntries,
   getFiles,
+  getDailyDigests,
 } = require("./db");
 
 const crypto = require("crypto");
@@ -431,6 +432,13 @@ function formatSessions(sessions) {
     .join("\n\n");
 }
 
+function formatDailyDigests(digests) {
+  if (digests.length === 0) return "No recent sessions.";
+  return digests
+    .map((d) => `[${d.date}] ${d.content}`)
+    .join("\n\n");
+}
+
 function formatEntries(entries) {
   if (entries.length === 0) return "None.";
   return entries
@@ -450,6 +458,7 @@ function rankContextSections(
   persistentEntries,
   calendarData,
   emailData,
+  dailyDigests,
 ) {
   const sections = [];
 
@@ -488,7 +497,15 @@ function rankContextSections(
     });
   }
 
-  if (recentSessions.length > 0) {
+  if (dailyDigests.length > 0) {
+    sections.push({
+      label: "Recent Sessions",
+      content: `## Recent Session History [daily digests]\n${formatDailyDigests(dailyDigests)}`,
+      priority: 4,
+      items: dailyDigests,
+    });
+  } else if (recentSessions.length > 0) {
+    // Fallback to individual sessions if no digests exist yet
     sections.push({
       label: "Recent Sessions",
       content: `## Recent Session History [auto-captured]\n${formatSessions(recentSessions)}`,
@@ -526,6 +543,7 @@ async function buildSystemPrompt(goals, options = {}) {
 
   const { getLatestUserModel } = require("./db");
   const [
+    dailyDigests,
     recentSessions,
     openActions,
     overdueActions,
@@ -533,6 +551,7 @@ async function buildSystemPrompt(goals, options = {}) {
     recentEntries,
     userModelEntry,
   ] = await Promise.all([
+    getDailyDigests(7),
     getRecentSessions(7),
     getOpenActions(),
     getOverdueActions(),
@@ -653,6 +672,7 @@ Context marked [user-maintained] was written by the user. Context marked [auto-c
     persistentEntries,
     calendarData,
     emailData,
+    dailyDigests,
   );
 
   // Assemble with deterministic trimming
@@ -732,6 +752,7 @@ Context marked [user-maintained] was written by the user. Context marked [auto-c
       persistentEntries: persistentEntries.length,
       recentEntries: recentEntries.length,
       recentSessions: recentSessions.length,
+      dailyDigests: dailyDigests.length,
       hasCalendar: !!calendarData,
       hasEmail: !!emailData,
       calendarEvents: calendarData ? (calendarData.today || []).length : 0,

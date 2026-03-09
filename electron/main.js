@@ -22,13 +22,19 @@ const {
   getLastDiagnostics, DEFAULT_CONTEXT_SOURCES, AGENT_DEFAULTS_BY_TYPE,
   migrateGoalSources, syncPreferencesTone, syncToneFromPreferences,
 } = require('../src/orchestrator');
-const { processSession, runUserModelGeneration, runPatternDetection } = require('../src/processor');
+const { processSession, runUserModelGeneration, runPatternDetection, runStalenessCheck } = require('../src/processor');
 const { webSearch } = require('../src/search');
 const { ingestFile, listFiles, getFile: getFileRecord } = require('../src/files');
 const { isGoogleConfigured } = require('../src/setup');
 const { readRuntimeJson, writeRuntimeJson } = require('../src/runtime');
 
 let mainWindow;
+
+// Chat state — module-scoped so before-quit handler can access it
+let chatSession = null;
+let chatHistory = [];
+let chatSystemPrompt = '';
+let chatSending = false;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -101,6 +107,48 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+// Emergency session save on quit
+let isQuitting = false;
+app.on('before-quit', async (event) => {
+  if (isQuitting || !chatSession) return;
+
+  event.preventDefault();
+  isQuitting = true;
+
+  const duration = Math.round((Date.now() - new Date(chatSession.created_at).getTime()) / 60000);
+
+  try {
+    if (chatHistory.length >= 2) {
+      // Full processing with a timeout — don't hang the quit
+      const result = await Promise.race([
+        processSession(chatSession.id, chatHistory, duration),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 30000)),
+      ]);
+      console.log(`[Quit] Session saved: ${result.entries} entries, ${result.actions} actions`);
+    } else {
+      await db.updateSession(chatSession.id, { duration_minutes: duration });
+    }
+  } catch (err) {
+    // Fallback: save a basic summary from the last few messages
+    console.error('[Quit] Full processing failed, saving fallback:', err.message);
+    try {
+      const recent = chatHistory.slice(-6).map(m => `${m.role}: ${m.content}`).join('\n');
+      const fallbackSummary = recent.length > 500 ? recent.slice(0, 500) + '...' : recent;
+      await db.updateSession(chatSession.id, {
+        summary: `[Auto-saved on quit] ${fallbackSummary}`,
+        duration_minutes: duration,
+      });
+    } catch (fallbackErr) {
+      console.error('[Quit] Fallback save also failed:', fallbackErr.message);
+    }
+  }
+
+  chatSession = null;
+  chatHistory = [];
+  chatSystemPrompt = '';
+  app.quit();
 });
 
 // --- IPC Registration ---
@@ -319,10 +367,6 @@ Keep it scannable. Under 3 minutes to read. Reference specific past events and c
   });
 
   // --- AI: Chat ---
-  let chatSession = null;
-  let chatHistory = [];
-  let chatSystemPrompt = '';
-  let chatSending = false;
 
   ipcMain.handle('chat:start', async (_, options) => {
     const chatStartTime = Date.now();
@@ -331,6 +375,8 @@ Keep it scannable. Under 3 minutes to read. Reference specific past events and c
 
     // Re-fetch fresh email and calendar data for this session
     const freshOptions = { ...(options || {}) };
+    let emailFetchFailed = false;
+    let calendarFetchFailed = false;
     try {
       const gmail = require('../src/integrations/gmail');
       if (gmail.isConfigured()) {
@@ -341,6 +387,7 @@ Keep it scannable. Under 3 minutes to read. Reference specific past events and c
       }
     } catch (err) {
       console.error('[Chat] Email fetch failed:', err.message);
+      emailFetchFailed = true;
     }
     try {
       const cal = require('../src/integrations/calendar');
@@ -350,6 +397,7 @@ Keep it scannable. Under 3 minutes to read. Reference specific past events and c
       }
     } catch (err) {
       console.error('[Chat] Calendar fetch failed:', err.message);
+      calendarFetchFailed = true;
     }
 
     const promptStartedAt = Date.now();
@@ -403,6 +451,14 @@ Keep it scannable. Under 3 minutes to read. Reference specific past events and c
       }
     } catch {}
 
+    // Data source warnings
+    if (emailFetchFailed) {
+      openerParts.push('EMAIL_CONTEXT: Fresh email fetch failed — I do not have current email information. Do not make assumptions about the user inbox.');
+    }
+    if (calendarFetchFailed) {
+      openerParts.push('CALENDAR_STATUS: Fresh calendar fetch failed. Calendar context may be outdated or unavailable. Do not make claims about today\'s schedule.');
+    }
+
     // Decision mode
     if (options && options.mode === 'decision') {
       openerParts.push(`MODE: Decision rehearsal. The user wants to think through a major decision. Start by asking what decision they're facing, then work through: name it precisely, identify affected goals, generate options (including not acting), run a pre-mortem, check opportunity cost, check second-order effects, and present your recommendation with confidence level. Work through one step at a time.`);
@@ -431,7 +487,7 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
     }
 
     logTiming('Session start completed', chatStartTime);
-    return { sessionId: chatSession.id, opening };
+    return { sessionId: chatSession.id, opening, emailFetchFailed, calendarFetchFailed };
   });
 
   // Session windowing â€” keep history manageable
@@ -549,7 +605,7 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
 
     let result = { entries: 0, actions: 0, decisions: 0 };
     try {
-      if (chatHistory.length >= 4) {
+      if (chatHistory.length >= 2) {
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('chat:processing-status', 'Extracting session insights...');
         }
@@ -562,18 +618,31 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
         result = await processSession(chatSession.id, chatHistory, duration, sendProgress);
         sendProgress('Session saved.');
 
-        // Check if user model / pattern detection should run (every 5 sessions)
+        // Check if background tasks should run (every 5 sessions)
         try {
           const settings = readRuntimeJson('settings.json', {});
-          const count = (settings.sessionsSinceLastUserModel || 0) + 1;
-          if (count >= 5) {
-            writeRuntimeJson('settings.json', { ...settings, sessionsSinceLastUserModel: 0 });
+          const modelCount = (settings.sessionsSinceLastUserModel || 0) + 1;
+          const stalenessCount = (settings.sessionsSinceLastStalenessCheck || 0) + 1;
+
+          const updatedSettings = { ...settings };
+
+          if (modelCount >= 5) {
+            updatedSettings.sessionsSinceLastUserModel = 0;
             // Run in background — don't block session end
             runUserModelGeneration().then(m => { if (m) console.log('[UserModel] Regenerated'); });
             runPatternDetection().then(r => console.log(`[Patterns] Detected ${r.detected}, saved ${r.saved}`));
           } else {
-            writeRuntimeJson('settings.json', { ...settings, sessionsSinceLastUserModel: count });
+            updatedSettings.sessionsSinceLastUserModel = modelCount;
           }
+
+          if (stalenessCount >= 5) {
+            updatedSettings.sessionsSinceLastStalenessCheck = 0;
+            runStalenessCheck().then(r => console.log(`[Staleness] Checked ${r.checked}, demoted ${r.demoted}`));
+          } else {
+            updatedSettings.sessionsSinceLastStalenessCheck = stalenessCount;
+          }
+
+          writeRuntimeJson('settings.json', updatedSettings);
         } catch (bgErr) {
           console.error('[Background tasks]', bgErr.message);
         }

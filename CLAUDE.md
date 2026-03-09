@@ -88,11 +88,12 @@ atlas/
 
 ## Architecture Notes
 
-- `src/orchestrator.js` is the core prompt/context assembly layer
-- `src/db.js` is the data access layer for goals, sessions, entries, actions, overrides, files
-- `src/processor.js` handles post-session summary, entry extraction, deduping, and action extraction
-- `electron/main.js` is the backend bridge for the Electron app and owns the IPC surface
-- `ui/js/app.js` is the main frontend application logic
+- `src/orchestrator.js` is the core prompt/context assembly layer. Loads daily digests (not raw sessions) into the system prompt for token efficiency.
+- `src/db.js` is the data access layer for goals, sessions, entries, actions, overrides, files, daily digests
+- `src/processor.js` handles the full post-session pipeline: extraction → intra-session dedup → cross-session dedup → save → daily digest generation. Also runs periodic background tasks (staleness checks).
+- `electron/main.js` is the backend bridge for the Electron app, owns the IPC surface, and handles emergency session save on quit via `before-quit` handler
+- `ui/js/app.js` is the main frontend application logic (vanilla JS — a React migration exists on the `react-migration` branch but is not production-ready)
+- `src/integrations/gmail.js` is a 6-layer email pipeline: triage → goal-aware ranking → deep read → thread expansion → summarisation → prompt injection. Ranking is goal-derived (no hardcoded keywords).
 - `config/user/*.md` are stable user-maintained context files
 - `config/agents/*.md` are advisory perspective files
 - `config/engine/methodology.md` is loaded as advisory methodology context
@@ -121,11 +122,19 @@ atlas/
 ## Recent Implementation State
 
 - Streaming chat is wired through IPC chunk events. The intended product behaviour is streamed responses for both engines.
-- The session start UX now shows immediate feedback instead of a blank wait.
+- The session start UX now shows immediate feedback instead of a blank wait. Typing indicator uses glowing dots with rotating status text.
 - Context interview flows use real modals and event listeners rather than fragile inline handlers.
 - Advisory Perspective settings use proper modals instead of `prompt()` / `confirm()`.
 - Source diagnostics use `connected / available / in context` wording rather than `excluded`.
 - Goal cards use clearer action hierarchy and status explanation copy.
+- Session processing threshold is 2 messages (not 4) — even a single exchange is worth processing.
+- Emergency session save on app close via `before-quit` handler with 30-second timeout and fallback.
+- Email fetch failures surface as toast warnings in the UI and as context in the system prompt opener.
+- Email ranking is fully goal-derived — no hardcoded keyword lists. STATUS_CHANGE_KEYWORDS remain for universal urgency signals.
+- Daily digest system compresses all sessions from a day into one entry. The system prompt loads digests (max 7) instead of individual session summaries (could be 30+).
+- Cross-session dedup prevents saving entries that duplicate information already in the database.
+- Staleness check runs every 5 sessions to demote persistent entries that are no longer accurate.
+- Markdown rendering supports tables (pipe syntax → HTML tables).
 
 ## Important Constraints
 
