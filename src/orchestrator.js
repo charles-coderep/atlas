@@ -786,8 +786,6 @@ const engines = {
   codex: new CodexEngine(),
 };
 
-const ENGINE_SETTINGS_FILE = getRuntimeFile("engine-settings.json");
-
 function loadPersistedEngineName() {
   const parsed = readRuntimeJson("engine-settings.json", {});
   if (parsed && typeof parsed.activeEngine === "string") {

@@ -2,7 +2,14 @@ const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
-// Load .env â€” check app root first, then resources directory for packaged app
+// Set runtime directory early — before any require that touches runtime.js.
+// Inside a packaged app, __dirname is inside the read-only asar archive,
+// so runtime files must go to the user-writable userData path instead.
+if (app.isPackaged) {
+  process.env.ATLAS_RUNTIME_DIR = path.join(app.getPath('userData'), 'runtime');
+}
+
+// Load .env — check app root first, then resources directory for packaged app
 const envPaths = [
   path.join(__dirname, '..', '.env'),
   path.join(process.resourcesPath || '', '.env'),
@@ -57,8 +64,6 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
-  process.env.ATLAS_RUNTIME_DIR = path.join(app.getPath('userData'), 'runtime');
-
   // Show window immediately so user sees something right away
   createWindow();
   registerIPC();
