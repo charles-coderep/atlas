@@ -609,6 +609,18 @@ async function getLatestUserModel() {
   return data && data.length > 0 ? data[0] : null;
 }
 
+async function demoteEntries(ids) {
+  if (!ids || ids.length === 0) return 0;
+  const db = getClient();
+  const { error } = await db
+    .from('entries')
+    .update({ importance: 1, is_persistent: false })
+    .in('id', ids);
+
+  if (error) throw error;
+  return ids.length;
+}
+
 async function clearPreviousUserModels() {
   const db = getClient();
   const { error } = await db
@@ -630,5 +642,5 @@ module.exports = {
   saveOverride, getUnresolvedOverrides, updateOverride, getAllOverrides,
   saveFile, getFiles, resetAllData, searchEntries,
   saveDecision, getPendingDecisionFollowups, getAllDecisions, updateDecision,
-  getLatestUserModel, clearPreviousUserModels,
+  getLatestUserModel, clearPreviousUserModels, demoteEntries,
 };

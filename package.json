@@ -39,7 +39,10 @@
       {
         "from": "config",
         "to": "config",
-        "filter": ["**/*", "!credentials/**"]
+        "filter": [
+          "**/*",
+          "!credentials/**"
+        ]
       }
     ]
   },
@@ -47,8 +50,9 @@
     "@supabase/supabase-js": "^2.98.0",
     "dotenv": "^17.3.1",
     "googleapis": "^171.4.0",
+    "p-limit": "^7.3.0",
     "papaparse": "^5.5.3",
-    "pdf-parse": "^2.4.5",
+    "pdf-parse": "^1.1.1",
     "whisper-cpp-node": "^0.2.12"
   },
   "devDependencies": {

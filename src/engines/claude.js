@@ -4,6 +4,8 @@ const path = require('path');
 const { spawn, execFileSync, execSync } = require('child_process');
 const BaseEngine = require('./base');
 
+const ENGINE_TIMEOUT_MS = 120_000; // 2 minutes
+
 class ClaudeEngine extends BaseEngine {
   constructor() {
     super('claude');
@@ -54,14 +56,27 @@ class ClaudeEngine extends BaseEngine {
     return new Promise((resolve, reject) => {
       const args = this._buildArgs(spFile, options);
       const proc = spawn(this._bin(), args, { env: this._env(), windowsHide: true });
+      let settled = false;
 
       let stdout = '';
       let stderr = '';
+
+      const timeout = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          proc.kill();
+          this._cleanupFile(spFile);
+          reject(new Error(`Active AI engine (${this.name}) timed out after ${ENGINE_TIMEOUT_MS / 1000}s`));
+        }
+      }, ENGINE_TIMEOUT_MS);
 
       proc.stdout.on('data', (data) => { stdout += data; });
       proc.stderr.on('data', (data) => { stderr += data; });
 
       proc.on('close', (code) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
         this._cleanupFile(spFile);
         if (code !== 0) {
           reject(new Error(`Active AI engine (${this.name}) exited with code ${code}: ${stderr}`));
@@ -71,6 +86,9 @@ class ClaudeEngine extends BaseEngine {
       });
 
       proc.on('error', (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
         this._cleanupFile(spFile);
         reject(new Error(`Failed to start active AI engine (${this.name}): ${err.message}`));
       });
@@ -85,11 +103,28 @@ class ClaudeEngine extends BaseEngine {
     return new Promise((resolve, reject) => {
       const args = this._buildArgs(spFile, options);
       const proc = spawn(this._bin(), args, { env: this._env(), windowsHide: true });
+      let settled = false;
+      let lastChunkAt = Date.now();
 
       let fullOutput = '';
       let stderr = '';
 
+      // Timeout: 2 min from start, resets on each chunk
+      const checkTimeout = () => {
+        if (settled) return;
+        if (Date.now() - lastChunkAt > ENGINE_TIMEOUT_MS) {
+          settled = true;
+          proc.kill();
+          this._cleanupFile(spFile);
+          reject(new Error(`Active AI engine (${this.name}) timed out after ${ENGINE_TIMEOUT_MS / 1000}s of inactivity`));
+          return;
+        }
+        setTimeout(checkTimeout, 10_000);
+      };
+      setTimeout(checkTimeout, ENGINE_TIMEOUT_MS);
+
       proc.stdout.on('data', (data) => {
+        lastChunkAt = Date.now();
         const text = data.toString();
         fullOutput += text;
         if (onChunk) onChunk(text);
@@ -98,6 +133,8 @@ class ClaudeEngine extends BaseEngine {
       proc.stderr.on('data', (data) => { stderr += data; });
 
       proc.on('close', (code) => {
+        if (settled) return;
+        settled = true;
         this._cleanupFile(spFile);
         if (code !== 0) {
           reject(new Error(`Active AI engine (${this.name}) exited with code ${code}: ${stderr}`));
@@ -107,6 +144,8 @@ class ClaudeEngine extends BaseEngine {
       });
 
       proc.on('error', (err) => {
+        if (settled) return;
+        settled = true;
         this._cleanupFile(spFile);
         reject(new Error(`Failed to start active AI engine (${this.name}): ${err.message}`));
       });

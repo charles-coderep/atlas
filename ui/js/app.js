@@ -31,59 +31,64 @@ function showToast(message, type = 'info', duration = 4000) {
 
 function renderMarkdown(text) {
   if (!text) return '';
-  let html = escapeHtml(text);
-  // Tables — parse before other block transforms
-  html = html.replace(/((?:^\|.+\|$\n?)+)/gm, (tableBlock) => {
-    const rows = tableBlock.trim().split('\n').filter(r => r.trim());
-    if (rows.length < 2) return tableBlock;
-    const parseRow = (row) => row.replace(/^\||\|$/g, '').split('|').map(c => c.trim());
-    // Check for separator row (second row must be all dashes/colons)
-    const sepCells = parseRow(rows[1]);
-    const isSeparator = sepCells.every(c => /^[:\-][\-]+[:\-]?$/.test(c));
-    if (!isSeparator) return tableBlock;
-    const headers = parseRow(rows[0]);
-    const headerHtml = '<tr>' + headers.map(h => `<th>${h}</th>`).join('') + '</tr>';
-    const bodyRows = rows.slice(2).map(row => {
-      const cells = parseRow(row);
-      return '<tr>' + cells.map(c => `<td>${c}</td>`).join('') + '</tr>';
-    }).join('');
-    return `<div class="md-table-wrap"><table class="md-table"><thead>${headerHtml}</thead><tbody>${bodyRows}</tbody></table></div>`;
-  });
-  // Headers (## → h2, ### → h3, # → h1)
-  html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
-  html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
-  html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
-  // Bold and italic
-  html = html.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
-  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-  html = html.replace(/(?<!\w)\*(.+?)\*(?!\w)/g, '<em>$1</em>');
-  // Links [text](url)
-  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
-  // Unordered lists
-  html = html.replace(/^[-*] (.+)$/gm, '<li>$1</li>');
-  // Ordered lists
-  html = html.replace(/^\d+\.\s+(.+)$/gm, '<li>$1</li>');
-  // Wrap consecutive <li> in <ul>
-  html = html.replace(/((?:<li>.*?<\/li>\s*)+)/g, '<ul>$1</ul>');
-  // Inline code
-  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-  // Paragraph breaks
-  html = html.replace(/\n\n/g, '</p><p>');
-  html = html.replace(/\n/g, '<br>');
-  html = '<p>' + html + '</p>';
-  // Clean up empty paragraphs and breaks around block elements
-  html = html.replace(/<p><(h[123]|ul|ol)/g, '<$1');
-  html = html.replace(/<\/(h[123]|ul|ol)><\/p>/g, '</$1>');
-  html = html.replace(/<br><(h[123]|ul|ol|li)/g, '<$1');
-  html = html.replace(/<\/(h[123]|ul|ol|li)><br>/g, '</$1>');
-  html = html.replace(/<p><\/p>/g, '');
-  html = html.replace(/<p><br>/g, '<p>');
-  // Clean up around tables
-  html = html.replace(/<p><div class="md-table-wrap">/g, '<div class="md-table-wrap">');
-  html = html.replace(/<\/div><\/p>/g, '</div>');
-  html = html.replace(/<br><div class="md-table-wrap">/g, '<div class="md-table-wrap">');
-  html = html.replace(/<\/div><br>/g, '</div>');
-  return html;
+  try {
+    let html = escapeHtml(text);
+    // Tables — parse before other block transforms
+    html = html.replace(/((?:^\|.+\|$\n?)+)/gm, (tableBlock) => {
+      const rows = tableBlock.trim().split('\n').filter(r => r.trim());
+      if (rows.length < 2) return tableBlock;
+      const parseRow = (row) => row.replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+      // Check for separator row (second row must be all dashes/colons)
+      const sepCells = parseRow(rows[1]);
+      const isSeparator = sepCells.every(c => /^[:\-][\-]+[:\-]?$/.test(c));
+      if (!isSeparator) return tableBlock;
+      const headers = parseRow(rows[0]);
+      const headerHtml = '<tr>' + headers.map(h => `<th>${h}</th>`).join('') + '</tr>';
+      const bodyRows = rows.slice(2).map(row => {
+        const cells = parseRow(row);
+        return '<tr>' + cells.map(c => `<td>${c}</td>`).join('') + '</tr>';
+      }).join('');
+      return `<div class="md-table-wrap"><table class="md-table"><thead>${headerHtml}</thead><tbody>${bodyRows}</tbody></table></div>`;
+    });
+    // Headers (## → h2, ### → h3, # → h1)
+    html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+    html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+    html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+    // Bold and italic
+    html = html.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    html = html.replace(/(?<!\w)\*(.+?)\*(?!\w)/g, '<em>$1</em>');
+    // Links [text](url)
+    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    // Unordered lists
+    html = html.replace(/^[-*] (.+)$/gm, '<li>$1</li>');
+    // Ordered lists
+    html = html.replace(/^\d+\.\s+(.+)$/gm, '<li>$1</li>');
+    // Wrap consecutive <li> in <ul>
+    html = html.replace(/((?:<li>.*?<\/li>\s*)+)/g, '<ul>$1</ul>');
+    // Inline code
+    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+    // Paragraph breaks
+    html = html.replace(/\n\n/g, '</p><p>');
+    html = html.replace(/\n/g, '<br>');
+    html = '<p>' + html + '</p>';
+    // Clean up empty paragraphs and breaks around block elements
+    html = html.replace(/<p><(h[123]|ul|ol)/g, '<$1');
+    html = html.replace(/<\/(h[123]|ul|ol)><\/p>/g, '</$1>');
+    html = html.replace(/<br><(h[123]|ul|ol|li)/g, '<$1');
+    html = html.replace(/<\/(h[123]|ul|ol|li)><br>/g, '</$1>');
+    html = html.replace(/<p><\/p>/g, '');
+    html = html.replace(/<p><br>/g, '<p>');
+    // Clean up around tables
+    html = html.replace(/<p><div class="md-table-wrap">/g, '<div class="md-table-wrap">');
+    html = html.replace(/<\/div><\/p>/g, '</div>');
+    html = html.replace(/<br><div class="md-table-wrap">/g, '<div class="md-table-wrap">');
+    html = html.replace(/<\/div><br>/g, '</div>');
+    return html;
+  } catch (err) {
+    console.error('[Markdown] Render failed:', err);
+    return escapeHtml(text);
+  }
 }
 
 function timeNow() {
@@ -459,7 +464,6 @@ async function sendChatMessage() {
       console.log(`[Timing] Chat stream first chunk in ${Math.round(performance.now() - requestStartedAt)}ms`);
       firstChunkLogged = true;
     }
-    console.log(`[Streaming] chunk received (${chunk.length} chars)`);
     streamingContent += chunk;
     if (!streamingMessageEl) {
       // Remove typing indicator on first chunk
@@ -470,7 +474,8 @@ async function sendChatMessage() {
     }
     const contentEl = streamingMessageEl.querySelector('.msg-content');
     if (contentEl) {
-      contentEl.innerHTML = renderMarkdown(streamingContent);
+      // Plain text during streaming — no markdown parsing per chunk
+      contentEl.textContent = streamingContent;
       contentEl.classList.add('streaming-cursor');
     }
     const messages = document.getElementById('chat-messages');
@@ -478,9 +483,11 @@ async function sendChatMessage() {
   });
 
   atlas.chat.onStreamEnd(() => {
+    console.log('[UI] Stream ended, content length:', streamingContent?.length);
     if (streamingMessageEl) {
       const contentEl = streamingMessageEl.querySelector('.msg-content');
       if (contentEl) {
+        // Full markdown render once on completion
         contentEl.innerHTML = renderMarkdown(streamingContent);
         contentEl.classList.remove('streaming-cursor');
       }
@@ -523,6 +530,11 @@ async function sendChatMessage() {
 
     if (!streamErrored && result && result.error) {
       appendChatMessage('chat-messages', 'system', `Error: ${result.error}`);
+      return;
+    }
+
+    if (!streamErrored && !result) {
+      appendChatMessage('chat-messages', 'system', 'Error: No response received from Atlas.');
       return;
     }
 
@@ -1013,7 +1025,7 @@ async function sendGoalInterviewMessage() {
     }
     const contentEl = streamingEl.querySelector('.msg-content');
     if (contentEl) {
-      contentEl.innerHTML = renderMarkdown(streamingContent);
+      contentEl.textContent = streamingContent;
       contentEl.classList.add('streaming-cursor');
     }
   });
@@ -1355,7 +1367,7 @@ async function requestContextInterview(message, history) {
     }
     const contentEl = streamingEl.querySelector('.msg-content');
     if (contentEl) {
-      contentEl.innerHTML = renderMarkdown(streamingContent);
+      contentEl.textContent = streamingContent;
       contentEl.classList.add('streaming-cursor');
     }
   });

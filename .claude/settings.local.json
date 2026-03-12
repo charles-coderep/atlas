@@ -4,7 +4,20 @@
       "Bash(mkdir:*)",
       "Bash(npm init:*)",
       "Bash(npm install:*)",
-      "Bash(node:*)"
+      "Bash(node:*)",
+      "Bash(claude:*)",
+      "Bash(where.exe claude:*)",
+      "Bash(ls:*)",
+      "Bash(npx electron-builder:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(cp:*)",
+      "Bash(timeout 8 npx vite:*)",
+      "Bash(npx vite:*)",
+      "Bash(timeout 15 npm run:*)",
+      "Bash(git checkout:*)",
+      "Bash(cd H:/atlas && npm run dist:win 2>&1)"
     ]
   }
 }

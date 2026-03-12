@@ -1,4 +1,4 @@
-const { updateSession, saveEntry, updateEntry, saveAction, saveOverride, getOpenActions, getActiveGoals, getCompletedActions, getRecentSessions, getRecentEntries, getPersistentEntries, saveDecision, getLatestUserModel, clearPreviousUserModels, getDailyDigest, getSessionsByDate } = require('./db');
+const { updateSession, saveEntry, updateEntry, saveAction, saveOverride, getOpenActions, getActiveGoals, getCompletedActions, getRecentSessions, getRecentEntries, getPersistentEntries, saveDecision, getLatestUserModel, clearPreviousUserModels, getDailyDigest, getSessionsByDate, demoteEntries } = require('./db');
 const { callEngine } = require('./orchestrator');
 
 const EXTRACTION_RUBRIC = `Rules for extraction:
@@ -14,13 +14,19 @@ async function processSession(sessionId, conversationHistory, durationMinutes, o
     return { entries: 0, actions: 0 };
   }
 
+  const pipelineStart = Date.now();
+  const timings = {};
+  const time = (label) => { timings[label] = Date.now(); };
+  const elapsed = (label) => ((Date.now() - timings[label]) / 1000).toFixed(1);
+
   const transcript = conversationHistory.map((m) => `${m.role}: ${m.content}`).join('\n\n');
   const goals = await getActiveGoals();
   const goalIds = goals.map((g) => `${g.id}: ${g.title}`).join(', ');
 
   if (onProgress) onProgress('Summarising conversation and extracting insights...');
 
-  // Run combined extractions in parallel (2 CLI calls instead of 4)
+  // --- Extraction (always runs) ---
+  time('extraction');
   const [summaryAndEntries, actionsAndDecisions] = await Promise.all([
     extractSummaryAndEntries(transcript, goalIds),
     extractActionsAndDecisions(transcript, goalIds),
@@ -30,6 +36,7 @@ async function processSession(sessionId, conversationHistory, durationMinutes, o
   const rawEntries = summaryAndEntries.entries;
   const rawActions = actionsAndDecisions.actions;
   const rawDecisions = actionsAndDecisions.decisions;
+  const extractionTime = elapsed('extraction');
 
   // Save session summary
   await updateSession(sessionId, {
@@ -37,9 +44,26 @@ async function processSession(sessionId, conversationHistory, durationMinutes, o
     duration_minutes: durationMinutes,
   });
 
+  // 4A: Novelty check — skip extended processing if nothing extracted and summary is thin
+  const summaryWordCount = (summary || '').split(/\s+/).length;
+  if (rawEntries.length === 0 && rawActions.length === 0 && rawDecisions.length === 0 && summaryWordCount < 50) {
+    console.log(`[Processor] Skipping extended processing — no entries extracted from this session.`);
+    console.log(`[Processor] Extraction: ${extractionTime}s | Total: ${((Date.now() - pipelineStart) / 1000).toFixed(1)}s`);
+    // Still update daily digest with the summary if available
+    if (summary && summary !== 'Summary generation failed.') {
+      try {
+        await updateDailyDigest(summary);
+      } catch (err) {
+        console.error('[Processor] Daily digest update failed:', err.message);
+      }
+    }
+    return { entries: 0, actions: 0, decisions: 0 };
+  }
+
   if (onProgress) onProgress(`Extracted ${rawEntries.length} entries, ${rawActions.length} actions, ${rawDecisions.length} decisions. Deduplicating...`);
 
-  // Deduplicate entries and actions together
+  // --- Intra-session dedup ---
+  time('dedup');
   let entries;
   let actions;
   let overrides;
@@ -50,8 +74,18 @@ async function processSession(sessionId, conversationHistory, durationMinutes, o
   } else {
     ({ entries, actions, overrides } = await deduplicateExtractions(rawEntries, rawActions));
   }
+  const dedupTime = elapsed('dedup');
 
-  // Cross-session dedup: remove new entries already covered by recent database entries
+  // --- Contradiction resolution ---
+  time('contradictions');
+  if (entries.length > 0) {
+    if (onProgress) onProgress('Resolving contradictions...');
+    await resolveContradictions(entries);
+  }
+  const contradictionsTime = elapsed('contradictions');
+
+  // --- Cross-session dedup ---
+  time('crossDedup');
   if (entries.length > 0) {
     if (onProgress) onProgress('Checking for cross-session duplicates...');
     entries = await deduplicateAgainstExisting(entries);
@@ -60,14 +94,17 @@ async function processSession(sessionId, conversationHistory, durationMinutes, o
   // Check for duplicate actions against existing open actions
   const existingActions = await getOpenActions();
   const newActions = await filterDuplicateActions(actions, existingActions);
+  const crossDedupTime = elapsed('crossDedup');
 
+  // --- Save ---
+  time('save');
   if (onProgress) onProgress('Saving to database...');
 
   // Save entries
   let entryCount = 0;
   for (const entry of entries) {
     try {
-      const saved = await saveEntry({
+      await saveEntry({
         session_id: sessionId,
         goal_id: entry.goal_id || null,
         domain: entry.domain,
@@ -79,7 +116,7 @@ async function processSession(sessionId, conversationHistory, durationMinutes, o
         tags: entry.tags || [],
       });
 
-      // If this is an override entry, also write to overrides table (Addendum 2)
+      // If this is an override entry, also write to overrides table
       if (entry.entry_type === 'override') {
         const override = overrides.find((o) => o.content === entry.content);
         if (override) {
@@ -132,8 +169,10 @@ async function processSession(sessionId, conversationHistory, durationMinutes, o
       console.error(`  Warning: failed to save decision: ${err.message}`);
     }
   }
+  const saveTime = elapsed('save');
 
-  // Generate or update daily digest (runs after all saves complete)
+  // --- Daily digest (runs after all saves and contradiction resolution) ---
+  time('digest');
   if (summary && summary !== 'Summary generation failed.') {
     try {
       if (onProgress) onProgress('Updating daily digest...');
@@ -142,6 +181,10 @@ async function processSession(sessionId, conversationHistory, durationMinutes, o
       console.error('[Processor] Daily digest update failed:', err.message);
     }
   }
+  const digestTime = elapsed('digest');
+
+  const totalTime = ((Date.now() - pipelineStart) / 1000).toFixed(1);
+  console.log(`[Processor] Extraction: ${extractionTime}s | Dedup: ${dedupTime}s | Contradictions: ${contradictionsTime}s | CrossDedup: ${crossDedupTime}s | Save: ${saveTime}s | Digest: ${digestTime}s | Total: ${totalTime}s`);
 
   return { entries: entryCount, actions: actionCount, decisions: decisionCount };
 }
@@ -419,7 +462,26 @@ async function filterDuplicateActions(newActions, existingActions) {
 async function deduplicateAgainstExisting(newEntries) {
   if (newEntries.length === 0) return newEntries;
 
-  const existingEntries = await getRecentEntries(7);
+  // 4B: Narrow comparison set — persistent + high-importance + same-goal entries
+  const [recentEntries, persistentEntries] = await Promise.all([
+    getRecentEntries(7),
+    getPersistentEntries(),
+  ]);
+
+  // Collect goal IDs from new entries for goal-scoped filtering
+  const newGoalIds = new Set(newEntries.map(e => e.goal_id).filter(Boolean));
+
+  const seen = new Set();
+  const existingEntries = [];
+  for (const e of [...persistentEntries, ...recentEntries]) {
+    if (seen.has(e.id)) continue;
+    seen.add(e.id);
+    // Keep: persistent, high-importance, or same goal as new entries
+    if (e.is_persistent || e.importance >= 3 || (e.goal_id && newGoalIds.has(e.goal_id))) {
+      existingEntries.push(e);
+    }
+  }
+
   if (existingEntries.length === 0) return newEntries;
 
   const prompt = `Here are entries already in the database from previous sessions, and here are new entries about to be saved from the latest session.
@@ -455,6 +517,63 @@ Return ONLY a JSON array of the index numbers of new entries that SHOULD BE SAVE
   } catch (err) {
     console.error('[Processor] Cross-session dedup failed:', err.message);
     return newEntries;
+  }
+}
+
+async function resolveContradictions(newEntries) {
+  if (newEntries.length === 0) return;
+
+  try {
+    const [recentEntries, persistentEntries] = await Promise.all([
+      getRecentEntries(7),
+      getPersistentEntries(),
+    ]);
+
+    // Merge and deduplicate by ID
+    const seen = new Set();
+    const existingEntries = [];
+    for (const e of [...recentEntries, ...persistentEntries]) {
+      if (!seen.has(e.id)) {
+        seen.add(e.id);
+        existingEntries.push(e);
+      }
+    }
+
+    if (existingEntries.length === 0) return;
+
+    const prompt = `Here are new entries about to be saved from the latest session, and here are existing entries already in the database.
+
+NEW ENTRIES (about to be saved):
+${JSON.stringify(newEntries.map(e => ({ content: e.content, domain: e.domain, entry_type: e.entry_type })), null, 2)}
+
+EXISTING ENTRIES:
+${JSON.stringify(existingEntries.map(e => ({ id: e.id, content: e.content, domain: e.domain, entry_type: e.entry_type, date: e.date, importance: e.importance })), null, 2)}
+
+Which existing entries are now factually contradicted or superseded by the new entries? Return a JSON array of objects with "id" and "reason" fields. If no contradictions exist, return an empty array [].`;
+
+    const result = await callEngine(prompt, 'You identify database entries that have been superseded by newer information. Be conservative — only flag clear factual contradictions where the old entry is now wrong. Do not flag entries that are merely related or thematically similar. Return only a valid JSON array.');
+    const match = result.match(/\[[\s\S]*?\]/);
+    if (!match) return;
+
+    const contradictions = JSON.parse(match[0]);
+    if (!Array.isArray(contradictions) || contradictions.length === 0) return;
+
+    // Validate IDs and demote
+    const validIds = new Set(existingEntries.map(e => e.id));
+    const idsToDemote = contradictions
+      .filter(c => c.id && validIds.has(c.id))
+      .map(c => c.id);
+
+    if (idsToDemote.length > 0) {
+      await demoteEntries(idsToDemote);
+      console.log(`[Processor] Contradiction resolution: demoted ${idsToDemote.length} entries`);
+      for (const c of contradictions.filter(c => idsToDemote.includes(c.id))) {
+        console.log(`  [Contradicted] ${c.id}: ${c.reason}`);
+      }
+    }
+  } catch (err) {
+    console.error('[Processor] Contradiction resolution failed:', err.message);
+    // Non-blocking — continue with normal processing
   }
 }
 
@@ -650,22 +769,14 @@ Return ONLY a JSON array of entry IDs to demote. If none are stale, return an em
 
     // Validate IDs against actual persistent entries
     const validIds = new Set(persistentEntries.map(e => e.id));
-    let demoted = 0;
-    for (const id of idsToDemote) {
-      if (!validIds.has(id)) continue;
-      try {
-        await updateEntry(id, { importance: 1, is_persistent: false });
-        demoted++;
-      } catch (err) {
-        console.error(`[Staleness] Failed to demote entry ${id}:`, err.message);
-      }
+    const validDemoteIds = idsToDemote.filter(id => validIds.has(id));
+
+    if (validDemoteIds.length > 0) {
+      await demoteEntries(validDemoteIds);
+      console.log(`[Staleness] Demoted ${validDemoteIds.length} stale persistent entries`);
     }
 
-    if (demoted > 0) {
-      console.log(`[Staleness] Demoted ${demoted} stale persistent entries`);
-    }
-
-    return { checked: persistentEntries.length, demoted };
+    return { checked: persistentEntries.length, demoted: validDemoteIds.length };
   } catch (err) {
     console.error('[Staleness] Check failed:', err.message);
     return { checked: 0, demoted: 0 };

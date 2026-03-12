@@ -4,7 +4,9 @@ const path = require('path');
 const CREDENTIALS_PATH = path.join(__dirname, '..', '..', 'config', 'credentials', 'google_credentials.json');
 const TOKEN_PATH = path.join(__dirname, '..', '..', 'config', 'credentials', 'google_token.json');
 
+const CACHE_TTL_MS = 120_000; // 2 minutes
 let cachedEvents = null;
+let cachedEventsTimestamp = 0;
 
 function isConfigured() {
   return fs.existsSync(CREDENTIALS_PATH) && fs.existsSync(TOKEN_PATH);
@@ -31,6 +33,12 @@ async function getAuth() {
 
 async function fetchCalendarEvents() {
   if (!isConfigured()) return null;
+
+  // Return cached result if within TTL
+  if (cachedEvents && (Date.now() - cachedEventsTimestamp) < CACHE_TTL_MS) {
+    console.log('  [Calendar: returning cached result]');
+    return cachedEvents;
+  }
 
   try {
     const { google } = require('googleapis');
@@ -69,6 +77,7 @@ async function fetchCalendarEvents() {
         return start >= now && start <= twoHoursFromNow;
       }),
     };
+    cachedEventsTimestamp = Date.now();
 
     return cachedEvents;
   } catch (err) {

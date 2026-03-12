@@ -11,9 +11,13 @@ const MAX_EXPANDED_THREADS = 2;
 const MAX_MESSAGES_PER_THREAD = 15;
 const MAX_THREAD_CHARS = 8000;
 const TRIAGE_WINDOW_HOURS = 72;
+const METADATA_CONCURRENCY = 6;
+const DEEP_READ_CONCURRENCY = 4;
 
-// --- Session cache ---
+// --- TTL cache ---
+const CACHE_TTL_MS = 120_000; // 2 minutes
 let cachedEmailContext = null;
+let cachedEmailTimestamp = 0;
 
 function isConfigured() {
   return fs.existsSync(CREDENTIALS_PATH) && fs.existsSync(TOKEN_PATH);
@@ -69,17 +73,24 @@ async function fetchTriageCandidates() {
     const messages = listResponse.data.messages || [];
     pageToken = listResponse.data.nextPageToken || null;
 
-    // Fetch metadata for each message in this page
-    for (const msg of messages) {
-      if (candidates.length >= MAX_TRIAGE_CANDIDATES) break;
+    // Fetch metadata with bounded concurrency
+    const pLimit = require('p-limit').default;
+    const limit = pLimit(METADATA_CONCURRENCY);
+    const remaining = MAX_TRIAGE_CANDIDATES - candidates.length;
+    const batch = messages.slice(0, remaining);
 
-      const detail = await gmail.users.messages.get({
-        userId: 'me',
-        id: msg.id,
-        format: 'metadata',
-        metadataHeaders: ['From', 'Subject', 'Date'],
-      });
+    const results = await Promise.all(
+      batch.map((msg) => limit(() =>
+        gmail.users.messages.get({
+          userId: 'me',
+          id: msg.id,
+          format: 'metadata',
+          metadataHeaders: ['From', 'Subject', 'Date'],
+        })
+      ))
+    );
 
+    for (const detail of results) {
       const headers = detail.data.payload.headers;
       const from = headers.find((h) => h.name === 'From')?.value || 'Unknown';
       const subject = headers.find((h) => h.name === 'Subject')?.value || 'No subject';
@@ -90,7 +101,7 @@ async function fetchTriageCandidates() {
       const isUnread = labelIds.includes('UNREAD');
 
       candidates.push({
-        id: msg.id,
+        id: detail.data.id,
         threadId,
         from,
         subject,
@@ -281,17 +292,27 @@ function decodeBody(payload) {
 }
 
 async function deepReadEmails(topCandidates, gmail) {
+  const pLimit = require('p-limit').default;
+  const limit = pLimit(DEEP_READ_CONCURRENCY);
+  const candidates = topCandidates.slice(0, MAX_DEEP_READ);
+
+  // Fetch all full messages in parallel with bounded concurrency
+  const fullMessages = await Promise.all(
+    candidates.map((candidate) => limit(() =>
+      gmail.users.messages.get({
+        userId: 'me',
+        id: candidate.id,
+        format: 'full',
+      })
+    ))
+  );
+
   const deepRead = [];
-  const expandedThreads = [];
   let threadExpansions = 0;
 
-  for (const candidate of topCandidates.slice(0, MAX_DEEP_READ)) {
-    // Fetch full message body
-    const full = await gmail.users.messages.get({
-      userId: 'me',
-      id: candidate.id,
-      format: 'full',
-    });
+  for (let i = 0; i < candidates.length; i++) {
+    const candidate = candidates[i];
+    const full = fullMessages[i];
 
     let body = decodeBody(full.data.payload);
     if (body.length > 2000) body = body.substring(0, 2000) + '...[truncated]';
@@ -303,7 +324,7 @@ async function deepReadEmails(topCandidates, gmail) {
       threadMessages: null,
     };
 
-    // Decide if thread expansion is warranted
+    // Thread expansion stays sequential (only up to 2, depends on prior results)
     const isStrategic = candidate.score >= 5;
     if (isStrategic && threadExpansions < MAX_EXPANDED_THREADS) {
       const threadData = await expandThread(candidate.threadId, gmail);
@@ -381,27 +402,32 @@ async function searchGmail(query) {
     });
 
     const messages = listResponse.data.messages || [];
-    const results = [];
+    if (messages.length === 0) return [];
 
-    for (const msg of messages) {
-      const detail = await gmail.users.messages.get({
-        userId: 'me',
-        id: msg.id,
-        format: 'metadata',
-        metadataHeaders: ['From', 'Subject', 'Date'],
-      });
+    const pLimit = require('p-limit').default;
+    const limit = pLimit(METADATA_CONCURRENCY);
 
+    const details = await Promise.all(
+      messages.map((msg) => limit(() =>
+        gmail.users.messages.get({
+          userId: 'me',
+          id: msg.id,
+          format: 'metadata',
+          metadataHeaders: ['From', 'Subject', 'Date'],
+        })
+      ))
+    );
+
+    return details.map((detail) => {
       const headers = detail.data.payload.headers;
-      results.push({
-        id: msg.id,
+      return {
+        id: detail.data.id,
         from: headers.find((h) => h.name === 'From')?.value || 'Unknown',
         subject: headers.find((h) => h.name === 'Subject')?.value || 'No subject',
         date: headers.find((h) => h.name === 'Date')?.value || '',
         snippet: detail.data.snippet || '',
-      });
-    }
-
-    return results;
+      };
+    });
   } catch (err) {
     console.log(`  [Gmail search: ${err.message}]`);
     return [];
@@ -479,6 +505,12 @@ function formatEmailsForPrompt(emailData) {
 async function fetchEmailContext(goals, openActions, recentEntries) {
   if (!isConfigured()) return null;
 
+  // Return cached result if within TTL
+  if (cachedEmailContext && (Date.now() - cachedEmailTimestamp) < CACHE_TTL_MS) {
+    console.log('  [Gmail: returning cached result]');
+    return cachedEmailContext;
+  }
+
   try {
     console.log(`  [Gmail: scanning last ${TRIAGE_WINDOW_HOURS}h...]`);
 
@@ -515,6 +547,7 @@ async function fetchEmailContext(goals, openActions, recentEntries) {
     };
 
     cachedEmailContext = emailContext;
+    cachedEmailTimestamp = Date.now();
     return emailContext;
   } catch (err) {
     console.log(`  [Gmail: ${err.message}]`);

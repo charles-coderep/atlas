@@ -35,6 +35,7 @@ let chatSession = null;
 let chatHistory = [];
 let chatSystemPrompt = '';
 let chatSending = false;
+let chatSendingStartedAt = null;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -248,8 +249,17 @@ Gather information through conversation. When you have enough, start your respon
   ipcMain.handle('files:ingest', (_, filePath, goalId) => ingestFile(filePath, goalId));
   ipcMain.handle('files:delete', async (_, id) => {
     const client = db.getClient();
+    // Get filename before deleting so we can remove the local copy
+    const { data: file } = await client.from('files').select('filename').eq('id', id).single();
     const { error } = await client.from('files').delete().eq('id', id);
     if (error) throw error;
+    // Remove local copy
+    if (file && file.filename) {
+      const localPath = path.join(__dirname, '..', 'files', file.filename);
+      if (fs.existsSync(localPath)) {
+        fs.unlinkSync(localPath);
+      }
+    }
   });
   ipcMain.handle('files:pickAndIngest', async (_, goalId) => {
     const result = await dialog.showOpenDialog(mainWindow, {
@@ -373,31 +383,62 @@ Keep it scannable. Under 3 minutes to read. Reference specific past events and c
     const goals = await db.getActiveGoals();
     if (goals.length === 0) return { error: 'No active goals. Create a goal first.' };
 
-    // Re-fetch fresh email and calendar data for this session
+    // Fetch email and calendar data — use cache if available, timeout at 5s
     const freshOptions = { ...(options || {}) };
     let emailFetchFailed = false;
     let calendarFetchFailed = false;
+    const INTEGRATION_TIMEOUT_MS = 5000;
+
+    const fetchWithTimeout = (fn, label) => Promise.race([
+      fn(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out`)), INTEGRATION_TIMEOUT_MS)),
+    ]);
+
     try {
       const gmail = require('../src/integrations/gmail');
       if (gmail.isConfigured()) {
         const openActions = await db.getOpenActions();
         const recentEntries = await db.getRecentEntries(7);
-        const emailData = await gmail.fetchEmailContext(goals, openActions, recentEntries);
+        const emailData = await fetchWithTimeout(
+          () => gmail.fetchEmailContext(goals, openActions, recentEntries),
+          'Email fetch'
+        );
         if (emailData) freshOptions.emailData = emailData;
       }
     } catch (err) {
       console.error('[Chat] Email fetch failed:', err.message);
       emailFetchFailed = true;
+      // Try to use stale cache if available
+      try {
+        const gmail = require('../src/integrations/gmail');
+        const stale = gmail.getCachedEmailContext();
+        if (stale) {
+          freshOptions.emailData = stale;
+          console.log('[Chat] Using stale email cache');
+        }
+      } catch {}
     }
     try {
       const cal = require('../src/integrations/calendar');
       if (cal.isConfigured()) {
-        const calData = await cal.fetchCalendarEvents();
+        const calData = await fetchWithTimeout(
+          () => cal.fetchCalendarEvents(),
+          'Calendar fetch'
+        );
         if (calData) freshOptions.calendarData = calData;
       }
     } catch (err) {
       console.error('[Chat] Calendar fetch failed:', err.message);
       calendarFetchFailed = true;
+      // Try to use stale cache if available
+      try {
+        const cal = require('../src/integrations/calendar');
+        const stale = cal.getCachedEvents();
+        if (stale) {
+          freshOptions.calendarData = stale;
+          console.log('[Chat] Using stale calendar cache');
+        }
+      } catch {}
     }
 
     const promptStartedAt = Date.now();
@@ -452,11 +493,15 @@ Keep it scannable. Under 3 minutes to read. Reference specific past events and c
     } catch {}
 
     // Data source warnings
-    if (emailFetchFailed) {
+    if (emailFetchFailed && !freshOptions.emailData) {
       openerParts.push('EMAIL_CONTEXT: Fresh email fetch failed — I do not have current email information. Do not make assumptions about the user inbox.');
+    } else if (emailFetchFailed && freshOptions.emailData) {
+      openerParts.push('EMAIL_CONTEXT: Email data is being refreshed in the background. Current context may not include the latest emails.');
     }
-    if (calendarFetchFailed) {
+    if (calendarFetchFailed && !freshOptions.calendarData) {
       openerParts.push('CALENDAR_STATUS: Fresh calendar fetch failed. Calendar context may be outdated or unavailable. Do not make claims about today\'s schedule.');
+    } else if (calendarFetchFailed && freshOptions.calendarData) {
+      openerParts.push('CALENDAR_STATUS: Calendar data is being refreshed in the background. Schedule info may not be fully current.');
     }
 
     // Decision mode
@@ -505,8 +550,17 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
 
   ipcMain.handle('chat:send', async (_, message, options = {}) => {
     if (!chatSession) return { error: 'No active session' };
-    if (chatSending) return { error: 'Already processing a message' };
+    if (chatSending) {
+      // Safety: auto-reset if stuck for over 3 minutes
+      if (chatSendingStartedAt && Date.now() - chatSendingStartedAt > 180_000) {
+        console.error('[Chat] chatSending flag stuck for >3min, force-resetting');
+        chatSending = false;
+      } else {
+        return { error: 'Already processing a message' };
+      }
+    }
     chatSending = true;
+    chatSendingStartedAt = Date.now();
 
     const streaming = options.streaming !== false; // default to streaming
 
@@ -521,6 +575,8 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
         const fullPrompt = historyPrefix.length > 0
           ? `Previous conversation:\n${historyPrefix.map((m) => `${m.role}: ${m.content}`).join('\n')}\n\nUser: ${message}`
           : message;
+
+        console.log(`[Chat] Prompt size: ${fullPrompt.length} chars (${chatHistory.length} messages), system prompt: ${chatSystemPrompt.length} chars`);
 
         let fullResponse = '';
         try {
@@ -543,17 +599,21 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
         response = await callEngineConversation(message, chatSystemPrompt, chatHistory.slice(0, -1));
       }
 
+      console.log('[Chat] Response type:', typeof response, 'length:', response?.length, 'first 300 chars:', String(response).substring(0, 300));
+
       // Process markers (shared for both paths)
       const markers = [];
       const searchPattern = /\[SEARCH:\s*(.+?)\]/g;
       const recallPattern = /\[RECALL:\s*(.+?)\]/g;
       const emailPattern = /\[EMAIL_SEARCH:\s*(.+?)\]/g;
+      const fetchPattern = /\[FETCH:\s*(.+?)\]/g;
 
       const searchMatches = [...response.matchAll(searchPattern)];
       const recallMatches = [...response.matchAll(recallPattern)];
       const emailMatches = [...response.matchAll(emailPattern)];
+      const fetchMatches = [...response.matchAll(fetchPattern)];
 
-      if (searchMatches.length > 0 || recallMatches.length > 0 || emailMatches.length > 0) {
+      if (searchMatches.length > 0 || recallMatches.length > 0 || emailMatches.length > 0 || fetchMatches.length > 0) {
         const contextParts = [];
         for (const m of searchMatches) {
           markers.push({ type: 'search', query: m[1].trim() });
@@ -580,6 +640,38 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
             contextParts.push(`Memory results for "${m[1].trim()}":\n${context}`);
           }
         }
+        for (const m of fetchMatches) {
+          const url = m[1].trim();
+          markers.push({ type: 'fetch', query: url });
+          try {
+            new URL(url); // validate
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 15000);
+            const res = await fetch(url, {
+              signal: controller.signal,
+              headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Atlas/2.0)' },
+              redirect: 'follow',
+            });
+            clearTimeout(timeout);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const html = await res.text();
+            const text = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+              .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+              .replace(/<[^>]+>/g, ' ')
+              .replace(/&nbsp;/g, ' ')
+              .replace(/&amp;/g, '&')
+              .replace(/&lt;/g, '<')
+              .replace(/&gt;/g, '>')
+              .replace(/&quot;/g, '"')
+              .replace(/&#39;/g, "'")
+              .replace(/\s+/g, ' ')
+              .trim();
+            const truncated = text.length > 3000 ? text.substring(0, 3000) + '...[truncated]' : text;
+            contextParts.push(`Content from ${url}:\n${truncated}`);
+          } catch (err) {
+            contextParts.push(`Could not access ${url} — the page may require authentication or be unavailable. (${err.message})`);
+          }
+        }
 
         if (contextParts.length > 0) {
           const refinedPrompt = `Here is the information you requested:\n\n${contextParts.join('\n\n---\n\n')}\n\nNow incorporate all of this into your advice. Cite what you found. Be specific.`;
@@ -594,12 +686,14 @@ Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'nume
       return { response, markers };
     } finally {
       chatSending = false;
+      chatSendingStartedAt = null;
     }
   });
 
   ipcMain.handle('chat:end', async () => {
     if (!chatSession) return null;
     chatSending = false;
+    chatSendingStartedAt = null;
 
     const duration = chatSession ? Math.round((Date.now() - new Date(chatSession.created_at).getTime()) / 60000) : 0;
 
